@@ -223,17 +223,31 @@ struct MenuBarRootView: View {
         }
 
         private var priorityServices: [ServiceStatus] {
-            let priority = ["OpenChronicle", "ownscribe", "cua-driver", "vlmac"]
+            let priority = ["OpenChronicle", "ownscribe", "Voice Context", "cua-driver", "vlmac"]
             return priority.map { expectedName in
-                store.snapshot.services.first { $0.name.localizedCaseInsensitiveCompare(expectedName) == .orderedSame }
+                if expectedName == "Voice Context" {
+                    return voiceContextService
+                }
+                return store.snapshot.services.first { $0.name.localizedCaseInsensitiveCompare(expectedName) == .orderedSame }
                     ?? ServiceStatus(id: expectedName, name: expectedName, status: "idle", detail: "Not reported")
             }
+        }
+
+        private var voiceContextService: ServiceStatus {
+            guard let fragment = store.contextFragments.first else {
+                return ServiceStatus(id: "voice-context", name: "Voice Context", status: "idle", detail: "No recent context")
+            }
+
+            let timestamp = formattedContextTimestamp(fragment.endedAt ?? fragment.startedAt)
+            let status = fragment.syncedAt == nil ? "available" : "online"
+            return ServiceStatus(id: "voice-context", name: "Voice Context", status: status, detail: "Last \(timestamp)")
         }
 
         private func icon(for name: String) -> String {
             switch name.lowercased() {
             case "openchronicle": "clock.arrow.circlepath"
             case "ownscribe": "mic.fill"
+            case "voice context": "text.bubble"
             case "cua-driver": "cursorarrow.click.2"
             case "vlmac": "eye.fill"
             default: "circle"
@@ -247,6 +261,13 @@ struct MenuBarRootView: View {
             let end = session.endedAt.flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date()
             let seconds = max(0, Int(end.timeIntervalSince(start)))
             return String(format: "%02d:%02d", seconds / 60, seconds % 60)
+        }
+
+        private func formattedContextTimestamp(_ value: String?) -> String {
+            guard let value, let date = ISO8601DateFormatter().date(from: value) else {
+                return "not reported"
+            }
+            return date.formatted(date: .omitted, time: .shortened)
         }
 
         private func toggleLanguage() {

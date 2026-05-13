@@ -16,6 +16,8 @@ DerivedData/
 
 # Local runtime logs and pid files
 .runtime/
+orchestrator-runtime/
+vlmac-runtime/
 *.log
 *.pid
 *.tmp

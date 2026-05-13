@@ -19,6 +19,7 @@ struct SettingsView: View {
     @State private var aiManusTemperatureDraft = ""
     @State private var aiManusMaxTokensDraft = ""
     @State private var aiManusExtraHeadersDraft = ""
+    @State private var basicMemorySearchDraft = ""
 
     private let serviceColumns = [
         GridItem(.adaptive(minimum: 210), spacing: 10, alignment: .top)
@@ -32,6 +33,9 @@ struct SettingsView: View {
                 serviceMatrix
                 ownscribeAudioConsole
                 aiManusRuntimeConsole
+                basicMemoryConsole
+                contextMemoryConsole
+                vlmacConsole
                 openChronicleConsole
                 cuaDriverConsole
                 secondaryControls
@@ -44,6 +48,9 @@ struct SettingsView: View {
             await store.bootstrap()
             await store.refreshOwnscribeConsole()
             await store.refreshManus()
+            await store.refreshBasicMemory()
+            await store.refreshContextFragments()
+            await store.refreshVlmacPreflight()
             syncProviderDrafts()
             syncAiManusDrafts()
         }
@@ -384,6 +391,316 @@ struct SettingsView: View {
         }
     }
 
+    private var basicMemoryConsole: some View {
+        HUDSection("basic-memory", systemImage: "brain.head.profile") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let basicMemoryService {
+                        ServiceLight(
+                            service: basicMemoryService,
+                            title: "basic-memory",
+                            detail: store.serviceDetail(basicMemoryService.detail, status: basicMemoryService.status)
+                        )
+                    } else {
+                        Text(store.text(.notReported))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(store.basicMemoryStatus.status, title: store.serviceStatus(store.basicMemoryStatus.status))
+                    if store.basicMemoryConfig.toolsAvailable == true {
+                        statusBadge("available", title: store.basicMemoryConfig.runtimeKind ?? "runtime")
+                    }
+                }
+
+                Divider()
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    SignalMetric(
+                        title: "Project",
+                        value: store.basicMemoryStatus.project ?? store.basicMemoryConfig.project ?? "not configured",
+                        systemImage: "folder",
+                        color: .blue
+                    )
+                    SignalMetric(
+                        title: "Project Dir",
+                        value: store.basicMemoryStatus.projectPath ?? store.basicMemoryConfig.projectPath ?? "not setup",
+                        systemImage: "folder.badge.gearshape",
+                        color: .green
+                    )
+                    SignalMetric(
+                        title: "Config Dir",
+                        value: store.basicMemoryConfig.configPath ?? "not reported",
+                        systemImage: "gearshape",
+                        color: .orange
+                    )
+                    SignalMetric(
+                        title: "Runtime",
+                        value: basicMemoryRuntimeLabel,
+                        systemImage: "terminal",
+                        color: .purple
+                    )
+                    SignalMetric(
+                        title: "Sync",
+                        value: store.basicMemoryStatus.syncStatus ?? store.basicMemoryLastSync?.status ?? "unknown",
+                        systemImage: "arrow.triangle.2.circlepath",
+                        color: .blue
+                    )
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Setup", icon: "wrench.and.screwdriver", tone: .primary) {
+                        await store.setupBasicMemory()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshBasicMemory()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+
+                    commandButton("Recent", icon: "clock", tone: .quiet) {
+                        await store.loadBasicMemoryRecent()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+                }
+
+                HStack(alignment: .bottom, spacing: 8) {
+                    providerField("Search notes", text: $basicMemorySearchDraft)
+                    commandButton("Search", icon: "magnifyingglass", tone: .primary) {
+                        await store.searchBasicMemory(basicMemorySearchDraft)
+                    }
+                    .frame(width: 130)
+                    .disabled(store.isRunningBasicMemoryCommand || basicMemorySearchDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Sync Session", icon: "rectangle.stack.badge.plus", tone: .quiet) {
+                        await store.syncCurrentSessionToBasicMemory()
+                    }
+                    commandButton("Sync Task", icon: "checklist", tone: .quiet) {
+                        await store.syncCurrentTaskToBasicMemory()
+                    }
+                    commandButton("Sync Skill", icon: "sparkles", tone: .quiet) {
+                        await store.syncLatestSkillToBasicMemory()
+                    }
+                }
+                .disabled(store.isRunningBasicMemoryCommand)
+
+                if let detail = basicMemorySyncDetail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    basicMemoryList(title: "Search", results: store.basicMemorySearch.results)
+                    basicMemoryRecentList
+                }
+
+                if let note = store.basicMemoryNotePreview {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .foregroundStyle(.secondary)
+                            Text(note.title ?? note.path ?? "Note preview")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            if let path = note.path {
+                                Text(path)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Text(note.content ?? note.summary ?? "No preview content.")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(10)
+                            .textSelection(.enabled)
+                    }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                if let detail = store.basicMemoryStatus.detail ?? store.basicMemoryConfig.detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                if let runtimeDetail = basicMemoryRuntimeDetail {
+                    Text(runtimeDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var contextMemoryConsole: some View {
+        HUDSection("Context Memory", systemImage: "text.bubble") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let service = voiceProducerService {
+                        ServiceLight(
+                            service: service,
+                            title: "voice producer",
+                            detail: store.serviceDetail(service.detail, status: service.status)
+                        )
+                    } else {
+                        ServiceLight(
+                            service: ServiceStatus(id: "voice-context", name: "voice producer", status: "idle", detail: "No voice context producer reported"),
+                            title: "voice producer",
+                            detail: "No voice context producer reported"
+                        )
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(voiceProducerService?.status ?? "idle", title: voiceProducerService.map { store.serviceStatus($0.status) })
+                }
+
+                Divider()
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    SignalMetric(
+                        title: "Latest",
+                        value: formattedContextTimestamp(latestContextFragment?.endedAt ?? latestContextFragment?.startedAt),
+                        systemImage: "clock",
+                        color: .cyan
+                    )
+                    SignalMetric(
+                        title: "Pending",
+                        value: "\(pendingContextCount)",
+                        systemImage: "tray",
+                        color: .orange
+                    )
+                    SignalMetric(
+                        title: "Synced",
+                        value: "\(syncedContextCount)",
+                        systemImage: "checkmark.icloud",
+                        color: .green
+                    )
+                }
+
+                HStack(spacing: 8) {
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshContextFragments()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+
+                    commandButton("Sync Recent", icon: "arrow.triangle.2.circlepath", tone: .primary) {
+                        await store.syncLatestContextFragmentToBasicMemory()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand || latestContextFragment == nil)
+
+                    Text(contextMemoryDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                if let detail = contextMemorySyncDetail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var vlmacConsole: some View {
+        HUDSection("vlmac", systemImage: "eye.fill") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let vlmacService {
+                        ServiceLight(
+                            service: vlmacService,
+                            title: "vlmac",
+                            detail: store.serviceDetail(vlmacService.detail, status: vlmacService.status)
+                        )
+                    } else {
+                        Text(store.text(.notReported))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(vlmacService?.status ?? "unknown", title: vlmacService.map { store.serviceStatus($0.status) })
+                }
+
+                Divider()
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    SignalMetric(
+                        title: "Storage",
+                        value: vlmacStorageDetail,
+                        systemImage: "externaldrive",
+                        color: .green
+                    )
+                    SignalMetric(
+                        title: "Preflight",
+                        value: store.vlmacPreflight?.compactDescription ?? "not checked",
+                        systemImage: "checkmark.seal",
+                        color: .blue
+                    )
+                }
+
+                HStack(spacing: 8) {
+                    commandButton(store.text(.start), icon: "play.fill", tone: .primary) {
+                        await store.vlmacStart()
+                    }
+                    commandButton(store.text(.restart), icon: "arrow.clockwise", tone: .amber) {
+                        await store.vlmacRestart()
+                    }
+                    commandButton(store.text(.stop), icon: "stop.fill", tone: .destructive) {
+                        await store.vlmacStop()
+                    }
+                    commandButton("Preflight", icon: "checkmark.seal", tone: .quiet) {
+                        await store.refreshVlmacPreflight()
+                    }
+                    Link(destination: URL(string: "http://127.0.0.1:59092")!) {
+                        Label("Open WebUI", systemImage: "safari")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .disabled(store.isBusy)
+
+                if let detail = vlmacService?.detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
     private var openChronicleConsole: some View {
         HUDSection(store.text(.openChronicleControls), systemImage: "record.circle") {
             VStack(alignment: .leading, spacing: 12) {
@@ -501,8 +818,26 @@ struct SettingsView: View {
         store.snapshot.services.first { $0.name.lowercased() == "ownscribe" }
     }
 
+    private var vlmacService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "vlmac" }
+    }
+
     private var aiManusService: ServiceStatus? {
         store.snapshot.services.first { $0.name.lowercased() == "ai-manus" }
+    }
+
+    private var basicMemoryService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "basic-memory" }
+    }
+
+    private var voiceProducerService: ServiceStatus? {
+        store.snapshot.services.first { service in
+            let name = service.name.lowercased()
+            return name == "ownscribe_context_worker"
+                || name == "ownscribe-context-worker"
+                || name == "voice-context"
+                || name == "voice context"
+        } ?? ownscribeService
     }
 
     private var aiManusRuntimeDetail: String {
@@ -525,6 +860,93 @@ struct SettingsView: View {
         let lines = store.aiManusRuntimeLogs.lines
         if lines.count <= 6 { return lines }
         return Array(lines.suffix(6))
+    }
+
+    private var basicMemorySyncDetail: String? {
+        guard let sync = store.basicMemoryLastSync else { return nil }
+        let status = sync.status ?? (sync.ok == true ? "synced" : "unknown")
+        let path = sync.path ?? sync.note?.path ?? sync.permalink ?? sync.note?.permalink
+        if let path {
+            return "\(status) · \(path)"
+        }
+        return sync.detail ?? status
+    }
+
+    private var vlmacStorageDetail: String {
+        if let detail = vlmacService?.detail, let range = detail.range(of: "storage=") {
+            return String(detail[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        return store.basicMemoryStatus.projectPath ?? store.basicMemoryConfig.projectPath ?? "not configured"
+    }
+
+    private var basicMemoryRuntimeLabel: String {
+        store.basicMemoryConfig.runtimeKind ?? store.basicMemoryConfig.status ?? "missing"
+    }
+
+    private var basicMemoryRuntimeDetail: String? {
+        let path = store.basicMemoryConfig.runtimePath
+            ?? store.basicMemoryConfig.bundledRuntimePath
+            ?? store.basicMemoryConfig.devRuntimePath
+        guard let path else { return nil }
+        if let command = store.basicMemoryConfig.commandDescription {
+            return "\(path) · \(command)"
+        }
+        return path
+    }
+
+    private var basicMemoryRecentList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent")
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundStyle(.secondary)
+
+            if store.basicMemoryRecent.resolvedNotes.isEmpty {
+                basicMemoryEmptyRow("No recent notes.")
+            } else {
+                ForEach(store.basicMemoryRecent.resolvedNotes) { note in
+                    Button {
+                        Task { await store.loadBasicMemoryNotePreview(note) }
+                    } label: {
+                        basicMemoryNoteLabel(
+                            title: note.title ?? note.path ?? "Untitled note",
+                            subtitle: note.updatedAt ?? note.createdAt ?? note.summary ?? ""
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var latestContextFragment: ContextFragment? {
+        store.contextFragments.first
+    }
+
+    private var pendingContextCount: Int {
+        store.contextFragments.filter { $0.syncedAt == nil }.count
+    }
+
+    private var syncedContextCount: Int {
+        store.contextFragments.filter { $0.syncedAt != nil }.count
+    }
+
+    private var contextMemoryDetail: String {
+        guard let fragment = latestContextFragment else {
+            return "No recent voice context."
+        }
+        let source = fragment.source ?? "voice"
+        let confidence = fragment.confidence.map { " · \(Int($0 * 100))%" } ?? ""
+        return "\(source)\(confidence) · \(fragment.syncedAt == nil ? "pending" : "synced")"
+    }
+
+    private var contextMemorySyncDetail: String? {
+        guard let sync = store.basicMemoryLastSync, sync.fragmentId != nil else { return nil }
+        let status = sync.status ?? (sync.ok == true ? "synced" : "unknown")
+        if let path = sync.path ?? sync.note?.path ?? sync.permalink ?? sync.note?.permalink {
+            return "\(status) · \(path)"
+        }
+        return sync.detail ?? status
     }
 
     private func audioSourceLabel(_ source: OwnscribeAudioSource) -> String {
@@ -557,6 +979,71 @@ struct SettingsView: View {
         }
         .padding(8)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func basicMemoryList(title: String, results: [BasicMemorySearchResult]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundStyle(.secondary)
+
+            if results.isEmpty {
+                basicMemoryEmptyRow("No search results.")
+            } else {
+                ForEach(results) { result in
+                    Button {
+                        Task { await store.loadBasicMemoryNotePreview(result) }
+                    } label: {
+                        basicMemoryNoteLabel(
+                            title: result.title ?? result.path ?? "Untitled result",
+                            subtitle: result.snippet ?? result.type ?? result.permalink ?? ""
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func basicMemoryNoteLabel(title: String, subtitle: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func basicMemoryEmptyRow(_ title: String) -> some View {
+        Text(title)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func formattedContextTimestamp(_ value: String?) -> String {
+        guard let value, let date = ISO8601DateFormatter().date(from: value) else {
+            return store.text(.notReported)
+        }
+        return date.formatted(date: .omitted, time: .shortened)
     }
 
     private func providerField(_ title: String, text: Binding<String>) -> some View {

@@ -149,6 +149,26 @@ struct OrchestratorClient {
         try await postSnapshot(path: "integrations/openchronicle/timeline-tick")
     }
 
+    func vlmacStatus() async throws -> ServiceStatus {
+        try await get(path: "integrations/vlmac/status")
+    }
+
+    func vlmacPreflight() async throws -> JSONValue {
+        try await get(path: "integrations/vlmac/preflight")
+    }
+
+    func vlmacStart() async throws -> AppSnapshot {
+        try await postSnapshot(path: "integrations/vlmac/start")
+    }
+
+    func vlmacStop() async throws -> AppSnapshot {
+        try await postSnapshot(path: "integrations/vlmac/stop")
+    }
+
+    func vlmacRestart() async throws -> AppSnapshot {
+        try await postSnapshot(path: "integrations/vlmac/restart")
+    }
+
     func ownscribeConfig() async throws -> OwnscribeConfig {
         try await get(path: "integrations/ownscribe/config")
     }
@@ -210,6 +230,80 @@ struct OrchestratorClient {
             throw OrchestratorError.invalidURL("integrations/ai-manus/runtime/logs")
         }
         return try await get(url: url)
+    }
+
+    func basicMemoryConfig() async throws -> BasicMemoryConfig {
+        try await getWrapped(path: "integrations/basic-memory/config")
+    }
+
+    func basicMemoryStatus() async throws -> BasicMemoryStatus {
+        try await getWrapped(path: "integrations/basic-memory/status")
+    }
+
+    func setupBasicMemory() async throws -> BasicMemoryStatus {
+        try await postWrapped(path: "integrations/basic-memory/setup")
+    }
+
+    func searchBasicMemory(query: String, limit: Int = 8) async throws -> BasicMemorySearchResponse {
+        var components = URLComponents(url: baseURL.appending(path: "integrations/basic-memory/search"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("integrations/basic-memory/search")
+        }
+        return try await get(url: url)
+    }
+
+    func recentBasicMemoryNotes(limit: Int = 8) async throws -> BasicMemoryRecentResponse {
+        var components = URLComponents(url: baseURL.appending(path: "integrations/basic-memory/recent"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("integrations/basic-memory/recent")
+        }
+        return try await get(url: url)
+    }
+
+    func basicMemoryNotePreview(_ request: BasicMemoryNotePreviewRequest) async throws -> BasicMemoryNote {
+        guard let identifier = request.identifier ?? request.path ?? request.permalink, !identifier.isEmpty else {
+            throw OrchestratorError.invalidURL("integrations/basic-memory/note")
+        }
+        return try await get(path: "integrations/basic-memory/note/\(identifier)")
+    }
+
+    func syncBasicMemorySession(_ sessionID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-session/\(sessionID)")
+    }
+
+    func syncBasicMemoryTask(_ taskID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-task/\(taskID)")
+    }
+
+    func syncBasicMemorySkill(_ skillID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-skill/\(skillID)")
+    }
+
+    func recentContextFragments(sessionID: String? = nil, modality: String? = "voice", limit: Int = 8) async throws -> ContextFragmentsResponse {
+        var components = URLComponents(url: baseURL.appending(path: "context/recent"), resolvingAgainstBaseURL: false)
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        if let sessionID, !sessionID.isEmpty {
+            queryItems.append(URLQueryItem(name: "session_id", value: sessionID))
+        }
+        if let modality, !modality.isEmpty {
+            queryItems.append(URLQueryItem(name: "modality", value: modality))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("context/recent")
+        }
+        return try await getWrapped(url: url, path: "context/recent")
+    }
+
+    func syncBasicMemoryContext(fragmentID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-context/\(fragmentID)")
     }
 
     func createManusSession() async throws -> ManusSessionResponse {
@@ -352,7 +446,10 @@ struct OrchestratorClient {
     }
 
     private func getWrapped<T: Decodable>(path: String) async throws -> T {
-        let url = baseURL.appending(path: path)
+        try await getWrapped(url: baseURL.appending(path: path), path: path)
+    }
+
+    private func getWrapped<T: Decodable>(url: URL, path: String) async throws -> T {
         let (data, response) = try await URLSession.shared.data(from: url)
         try validate(response, data: data)
         return try decodeWrapped(T.self, from: data, path: path)

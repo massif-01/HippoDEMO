@@ -440,6 +440,227 @@ struct AiManusStatus: Codable, Equatable, Sendable {
     static let empty = AiManusStatus(ok: false, status: "unknown", detail: nil, config: nil)
 }
 
+struct BasicMemoryConfig: Codable, Equatable, Sendable {
+    var enabled: Bool?
+    var status: String?
+    var project: String?
+    var home: String?
+    var projectPath: String?
+    var configPath: String?
+    var bundledRuntimePath: String?
+    var devRuntimePath: String?
+    var runtimeKind: String?
+    var runtimePath: String?
+    var runtimeDetail: String?
+    var commandDescription: String?
+    var toolsAvailable: Bool?
+    var detail: String?
+
+    static let empty = BasicMemoryConfig(
+        enabled: false,
+        status: "unknown",
+        project: nil,
+        home: nil,
+        projectPath: nil,
+        configPath: nil,
+        bundledRuntimePath: nil,
+        devRuntimePath: nil,
+        runtimeKind: nil,
+        runtimePath: nil,
+        runtimeDetail: nil,
+        commandDescription: nil,
+        toolsAvailable: nil,
+        detail: nil
+    )
+}
+
+struct BasicMemoryStatus: Codable, Sendable {
+    var ok: Bool?
+    var status: String
+    var detail: String?
+    var project: String?
+    var projectPath: String?
+    var notesCount: Int?
+    var entitiesCount: Int?
+    var observationsCount: Int?
+    var syncStatus: String?
+    var service: ServiceStatus?
+
+    static let empty = BasicMemoryStatus(
+        ok: false,
+        status: "unknown",
+        detail: nil,
+        project: nil,
+        projectPath: nil,
+        notesCount: nil,
+        entitiesCount: nil,
+        observationsCount: nil,
+        syncStatus: nil,
+        service: nil
+    )
+}
+
+struct BasicMemorySearchResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var query: String?
+    var results: [BasicMemorySearchResult]
+    var detail: String?
+    var elapsedMs: Double?
+
+    static let empty = BasicMemorySearchResponse(ok: false, query: nil, results: [], detail: nil, elapsedMs: nil)
+}
+
+struct BasicMemorySearchResult: Identifiable, Codable, Equatable, Sendable {
+    var identifier: String?
+    var title: String?
+    var path: String?
+    var type: String?
+    var score: Double?
+    var snippet: String?
+    var content: String?
+    var permalink: String?
+    var metadata: [String: JSONValue]?
+
+    var id: String {
+        identifier ?? path ?? permalink ?? title ?? snippet ?? "basic-memory-search-result"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case identifier = "id"
+        case title
+        case path
+        case type
+        case score
+        case snippet
+        case content
+        case permalink
+        case metadata
+    }
+}
+
+struct BasicMemoryRecentResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var notes: [BasicMemoryNote]?
+    var items: [BasicMemoryNote]?
+    var detail: String?
+
+    var resolvedNotes: [BasicMemoryNote] { notes ?? items ?? [] }
+
+    static let empty = BasicMemoryRecentResponse(ok: false, notes: [], items: nil, detail: nil)
+}
+
+struct BasicMemoryNote: Identifiable, Codable, Equatable, Sendable {
+    var identifier: String?
+    var title: String?
+    var path: String?
+    var content: String?
+    var summary: String?
+    var kind: String?
+    var permalink: String?
+    var createdAt: String?
+    var updatedAt: String?
+    var frontmatter: [String: JSONValue]?
+    var metadata: [String: JSONValue]?
+
+    var id: String {
+        identifier ?? path ?? permalink ?? title ?? "basic-memory-note"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case identifier = "id"
+        case title
+        case path
+        case content
+        case summary
+        case kind
+        case permalink
+        case createdAt
+        case updatedAt
+        case frontmatter
+        case metadata
+    }
+}
+
+struct BasicMemoryNotePreviewRequest: Codable, Sendable {
+    var identifier: String?
+    var path: String?
+    var permalink: String?
+}
+
+struct BasicMemorySyncResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var status: String?
+    var detail: String?
+    var path: String?
+    var permalink: String?
+    var note: BasicMemoryNote?
+    var fragmentId: String?
+    var createdCount: Int?
+    var updatedCount: Int?
+    var syncedNotes: [BasicMemoryNote]?
+
+    static let empty = BasicMemorySyncResponse(
+        ok: false,
+        status: nil,
+        detail: nil,
+        path: nil,
+        permalink: nil,
+        note: nil,
+        fragmentId: nil,
+        createdCount: nil,
+        updatedCount: nil,
+        syncedNotes: nil
+    )
+}
+
+struct ContextFragment: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var sessionId: String?
+    var modality: String?
+    var source: String?
+    var text: String?
+    var startedAt: String?
+    var endedAt: String?
+    var sequence: Int?
+    var confidence: Double?
+    var metadata: [String: JSONValue]?
+    var syncedAt: String?
+}
+
+struct ContextFragmentsResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var fragments: [ContextFragment]?
+    var items: [ContextFragment]?
+    var detail: String?
+
+    var resolvedFragments: [ContextFragment] { fragments ?? items ?? [] }
+
+    static let empty = ContextFragmentsResponse(ok: false, fragments: [], items: nil, detail: nil)
+
+    init(ok: Bool?, fragments: [ContextFragment]?, items: [ContextFragment]?, detail: String?) {
+        self.ok = ok
+        self.fragments = fragments
+        self.items = items
+        self.detail = detail
+    }
+
+    init(from decoder: Decoder) throws {
+        if let fragments = try? [ContextFragment](from: decoder) {
+            self.ok = true
+            self.fragments = fragments
+            self.items = nil
+            self.detail = nil
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try container.decodeIfPresent(Bool.self, forKey: .ok)
+        fragments = try container.decodeIfPresent([ContextFragment].self, forKey: .fragments)
+        items = try container.decodeIfPresent([ContextFragment].self, forKey: .items)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+    }
+}
+
 struct ManusThread: Identifiable, Codable, Equatable, Sendable {
     var id: String
     var sessionId: String

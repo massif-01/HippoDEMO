@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import struct
 import sys
 import urllib.error
 import urllib.request
@@ -27,6 +28,7 @@ CONFIG_PATH = PROJECT_DIR / "orchestrator" / "data" / "ownscribe_config.json"
 PROVIDER_CONFIG_PATH = PROJECT_DIR / ".runtime" / "ownscribe-provider.json"
 SUMMARY_PROMPT_PATH = PROJECT_DIR / "orchestrator" / "prompts" / "meeting_summary_zh.md"
 SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+WAV_HEADER_SIZE = 44
 
 CHILD_CODE = """\
 import json
@@ -236,6 +238,15 @@ class _SessionProcess:
     started_at: str
     stopped_at: str | None = None
     result: OwnscribeResult | None = None
+
+
+@dataclass(frozen=True)
+class _WavLayout:
+    fmt_data: bytes
+    data_start: int
+    byte_rate: int
+    block_align: int
+    data_bytes_available: int
 
 
 class OwnscribeAdapter:
@@ -607,6 +618,99 @@ class OwnscribeAdapter:
                 )
             record.result = self._collect_result(record, returncode=record.process.returncode)
             return record.result
+
+    def output_dir_for_session(self, session_id: str) -> Path:
+        validation_error = self._validate_session_id(session_id)
+        if validation_error:
+            raise ValueError(validation_error)
+        record = self._sessions.get(session_id)
+        if record is not None:
+            return record.base_output_dir
+        candidate = DATA_DIR / session_id
+        if candidate.exists() and candidate.is_dir():
+            return candidate
+        raise FileNotFoundError(f"ownscribe output directory not found for session {session_id}")
+
+    def recording_timeline(self, session_id: str) -> dict[str, Any]:
+        output_dir = self.output_dir_for_session(session_id)
+        timeline_path = output_dir / "recording_timeline.json"
+        if not timeline_path.exists():
+            return {}
+        try:
+            payload = json.loads(timeline_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def recording_audio_duration_seconds(self, session_id: str) -> float:
+        output_dir = self.output_dir_for_session(session_id)
+        audio_path = self._audio_path(output_dir)
+        if audio_path is None:
+            return 0.0
+        layout = self._wav_layout(audio_path)
+        if layout.byte_rate <= 0:
+            return 0.0
+        return max(0.0, layout.data_bytes_available / layout.byte_rate)
+
+    def create_audio_segment(
+        self,
+        session_id: str,
+        *,
+        sequence: int,
+        start_offset_seconds: float,
+        end_offset_seconds: float,
+        allow_partial: bool = False,
+    ) -> Path:
+        output_dir = self.output_dir_for_session(session_id)
+        audio_path = self._audio_path(output_dir)
+        if audio_path is None:
+            raise FileNotFoundError(f"recording.wav not found for session {session_id}")
+
+        layout = self._wav_layout(audio_path)
+        available_duration = layout.data_bytes_available / layout.byte_rate if layout.byte_rate else 0.0
+        if end_offset_seconds > available_duration:
+            if not allow_partial:
+                raise ValueError(
+                    f"segment {sequence} needs {end_offset_seconds:.2f}s, "
+                    f"but only {available_duration:.2f}s is available"
+                )
+            end_offset_seconds = available_duration
+
+        if end_offset_seconds - start_offset_seconds < 0.5:
+            raise ValueError(f"segment {sequence} is too short to transcribe")
+
+        start_byte = self._aligned_audio_byte(start_offset_seconds, layout)
+        end_byte = self._aligned_audio_byte(end_offset_seconds, layout)
+        end_byte = min(end_byte, layout.data_bytes_available)
+        if end_byte <= start_byte:
+            raise ValueError(f"segment {sequence} contains no audio bytes")
+
+        segment_dir = output_dir / "segments"
+        segment_dir.mkdir(parents=True, exist_ok=True)
+        start_ms = int(start_offset_seconds * 1000)
+        end_ms = int(end_offset_seconds * 1000)
+        segment_path = segment_dir / f"segment_{sequence:04d}_{start_ms}_{end_ms}.wav"
+
+        with audio_path.open("rb") as source:
+            source.seek(layout.data_start + start_byte)
+            audio_bytes = source.read(end_byte - start_byte)
+        if not audio_bytes:
+            raise ValueError(f"segment {sequence} read no audio bytes")
+
+        self._write_wav_segment(segment_path, layout.fmt_data, audio_bytes)
+        return segment_path
+
+    def transcribe_audio_segment(self, audio_path: str | Path) -> dict[str, Any]:
+        segment_path = Path(audio_path)
+        transcript_payload = self._transcribe_audio(self._prepare_audio_for_asr(segment_path))
+        transcript_text = self._extract_transcript_text(transcript_payload)
+        return {
+            "text": transcript_text,
+            "payload": transcript_payload,
+            "audio_path": str(segment_path),
+            "provider": self._asr_provider(),
+            "model": transcript_payload.get("model") if isinstance(transcript_payload, dict) else None,
+        }
 
     def _postprocess_recording(self, base_output_dir: Path) -> str | None:
         audio_path = self._audio_path(base_output_dir)
@@ -1360,6 +1464,74 @@ class OwnscribeAdapter:
             return recording
         wav_files = sorted(directory.glob("*.wav"), key=lambda path: path.stat().st_mtime, reverse=True)
         return wav_files[0] if wav_files else None
+
+    def _wav_layout(self, audio_path: Path) -> _WavLayout:
+        if not audio_path.exists() or audio_path.stat().st_size <= WAV_HEADER_SIZE:
+            raise ValueError(f"{audio_path} does not contain enough WAV data")
+
+        fmt_data: bytes | None = None
+        data_start: int | None = None
+        with audio_path.open("rb") as file:
+            if file.read(4) != b"RIFF":
+                raise ValueError(f"{audio_path} is not a RIFF WAV file")
+            file.seek(8)
+            if file.read(4) != b"WAVE":
+                raise ValueError(f"{audio_path} is not a WAVE file")
+
+            while True:
+                chunk_id = file.read(4)
+                chunk_size_raw = file.read(4)
+                if len(chunk_id) < 4 or len(chunk_size_raw) < 4:
+                    break
+                chunk_size = struct.unpack("<I", chunk_size_raw)[0]
+                if chunk_id == b"fmt ":
+                    fmt_data = file.read(chunk_size)
+                elif chunk_id == b"data":
+                    data_start = file.tell()
+                    break
+                else:
+                    file.seek(chunk_size + (chunk_size % 2), os.SEEK_CUR)
+
+        if fmt_data is None or data_start is None:
+            raise ValueError(f"{audio_path} is missing fmt or data chunks")
+        if len(fmt_data) < 16:
+            raise ValueError(f"{audio_path} has an unsupported fmt chunk")
+
+        byte_rate = struct.unpack("<I", fmt_data[8:12])[0]
+        block_align = struct.unpack("<H", fmt_data[12:14])[0]
+        if byte_rate <= 0 or block_align <= 0:
+            raise ValueError(f"{audio_path} has invalid WAV byte rate or block alignment")
+
+        data_bytes_available = max(0, audio_path.stat().st_size - data_start)
+        data_bytes_available -= data_bytes_available % block_align
+        return _WavLayout(
+            fmt_data=fmt_data,
+            data_start=data_start,
+            byte_rate=byte_rate,
+            block_align=block_align,
+            data_bytes_available=data_bytes_available,
+        )
+
+    def _aligned_audio_byte(self, offset_seconds: float, layout: _WavLayout) -> int:
+        raw = max(0, int(offset_seconds * layout.byte_rate))
+        return raw - (raw % layout.block_align)
+
+    def _write_wav_segment(self, segment_path: Path, fmt_data: bytes, audio_bytes: bytes) -> None:
+        fmt_padding = b"\x00" if len(fmt_data) % 2 else b""
+        data_padding = b"\x00" if len(audio_bytes) % 2 else b""
+        riff_size = 4 + 8 + len(fmt_data) + len(fmt_padding) + 8 + len(audio_bytes) + len(data_padding)
+        with segment_path.open("wb") as file:
+            file.write(b"RIFF")
+            file.write(struct.pack("<I", riff_size))
+            file.write(b"WAVE")
+            file.write(b"fmt ")
+            file.write(struct.pack("<I", len(fmt_data)))
+            file.write(fmt_data)
+            file.write(fmt_padding)
+            file.write(b"data")
+            file.write(struct.pack("<I", len(audio_bytes)))
+            file.write(audio_bytes)
+            file.write(data_padding)
 
     def _signal_process_group(self, process: subprocess.Popen[bytes], sig: signal.Signals) -> None:
         if process.poll() is not None:

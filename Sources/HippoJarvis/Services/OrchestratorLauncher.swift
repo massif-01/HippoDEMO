@@ -50,7 +50,7 @@ final class OrchestratorLauncher {
         }
 
         let next = Process()
-        let python = pythonURL()
+        let python = pythonURL(root: root)
         next.executableURL = python
         if python.path == "/usr/bin/env" {
             next.arguments = ["python3", "-m", "uvicorn", "orchestrator.main:app", "--host", "127.0.0.1", "--port", "8787"]
@@ -61,6 +61,14 @@ final class OrchestratorLauncher {
         var environment = ProcessInfo.processInfo.environment
         environment["PYTHONPATH"] = root.path
         environment["HIPPODEMO_ROOT"] = root.path
+        environment["HIPPODEMO_PYTHON"] = python.path
+        let bundledPathEntries = [
+            root.appending(path: "orchestrator-runtime/bin").path,
+            root.appending(path: "vlmac-runtime/bin").path
+        ].filter { FileManager.default.fileExists(atPath: $0) }
+        if !bundledPathEntries.isEmpty {
+            environment["PATH"] = (bundledPathEntries + [environment["PATH"] ?? ""]).joined(separator: ":")
+        }
         next.environment = environment
 
         let output = try FileHandle(forWritingTo: logURL)
@@ -98,9 +106,12 @@ final class OrchestratorLauncher {
         return nil
     }
 
-    private func pythonURL() -> URL {
+    private func pythonURL(root: URL) -> URL {
         let candidates = [
+            root.appending(path: "orchestrator-runtime/bin/python").path,
+            root.appending(path: "orchestrator/.venv/bin/python").path,
             "/opt/homebrew/Caskroom/miniconda/base/bin/python",
+            "/opt/homebrew/opt/python@3.13/bin/python3.13",
             "/opt/homebrew/bin/python3",
             "/usr/bin/python3",
         ]

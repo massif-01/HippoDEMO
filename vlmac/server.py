@@ -1,9 +1,9 @@
 import asyncio
 import base64
-import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,7 +16,6 @@ import httpx
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from minio import Minio
 from pydantic import BaseModel, Field
 
 app = FastAPI()
@@ -25,27 +24,6 @@ VLLM_BASE = os.environ.get("VLLM_BASE_URL", "http://localhost:58000")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "RM-01 VLM")
 
 STATIC_DIR = Path(__file__).parent / "static"
-
-# ---- MinIO config ----
-MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "localhost:9000")
-MINIO_ACCESS_KEY = os.environ.get("MINIO_ACCESS_KEY", "rm01")
-MINIO_SECRET_KEY = os.environ.get("MINIO_SECRET_KEY", "rm01rm01")
-MINIO_BUCKET = os.environ.get("MINIO_BUCKET", "rm01")
-MINIO_PREFIX = os.environ.get("MINIO_PREFIX", "context")
-
-minio_client = Minio(
-    MINIO_ENDPOINT,
-    access_key=MINIO_ACCESS_KEY,
-    secret_key=MINIO_SECRET_KEY,
-    secure=False,
-)
-
-# Ensure bucket exists
-if not minio_client.bucket_exists(MINIO_BUCKET):
-    minio_client.make_bucket(MINIO_BUCKET)
-    print(f"[minio] Created bucket: {MINIO_BUCKET}")
-else:
-    print(f"[minio] Bucket exists: {MINIO_BUCKET}")
 
 
 @app.get("/")
@@ -56,94 +34,375 @@ async def index():
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
-def save_to_minio(content: str, filename: str | None = None) -> str:
-    """Save text content to MinIO and return the object path."""
-    if not filename:
-        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-        filename = f"{ts}.md"
-    object_name = f"{MINIO_PREFIX}/{filename}"
-    data = content.encode("utf-8")
-    minio_client.put_object(
-        MINIO_BUCKET, object_name,
-        io.BytesIO(data), len(data),
-        content_type="text/markdown; charset=utf-8",
-    )
-    print(f"[minio] Saved: {MINIO_BUCKET}/{object_name} ({len(data)} bytes)")
-    return object_name
-
-
-def append_to_minio(filename: str, section: str) -> str:
-    """Append a section to an existing MinIO file, or create it."""
-    object_name = f"{MINIO_PREFIX}/{filename}"
-    existing = ""
+def _resolve_ffmpeg() -> str | None:
+    env_path = os.environ.get("HIPPODEMO_FFMPEG_PATH")
+    if env_path and Path(env_path).expanduser().exists():
+        return str(Path(env_path).expanduser())
+    system_path = shutil.which("ffmpeg")
+    if system_path:
+        return system_path
     try:
-        resp = minio_client.get_object(MINIO_BUCKET, object_name)
-        existing = resp.read().decode("utf-8")
-        resp.close()
-        resp.release_conn()
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
-        pass  # file doesn't exist yet
-
-    new_content = existing + section
-    data = new_content.encode("utf-8")
-    minio_client.put_object(
-        MINIO_BUCKET, object_name,
-        io.BytesIO(data), len(data),
-        content_type="text/markdown; charset=utf-8",
-    )
-    print(f"[minio] Appended to {MINIO_BUCKET}/{object_name} ({len(data)} bytes total)")
-    return object_name
+        return None
 
 
-@app.get("/api/minio/list")
-async def api_minio_list(limit: int = 50):
-    """List objects in the context directory."""
-    loop = asyncio.get_event_loop()
-    def _list():
-        objects = []
-        for obj in minio_client.list_objects(MINIO_BUCKET, prefix=f"{MINIO_PREFIX}/", recursive=True):
-            objects.append({
-                "name": obj.object_name,
-                "size": obj.size,
-                "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
-            })
-        objects.sort(key=lambda x: x["last_modified"] or "", reverse=True)
-        return objects[:limit]
-    return {"objects": await loop.run_in_executor(None, _list)}
+def _resolve_ffprobe() -> str | None:
+    env_path = os.environ.get("HIPPODEMO_FFPROBE_PATH")
+    if env_path and Path(env_path).expanduser().exists():
+        return str(Path(env_path).expanduser())
+    return shutil.which("ffprobe")
 
 
-@app.get("/api/minio/read")
-async def api_minio_read(path: str):
-    """Read a text object from MinIO."""
-    if not path.startswith(f"{MINIO_PREFIX}/"):
-        return {"error": "Access denied"}
-    loop = asyncio.get_event_loop()
-    def _read():
-        resp = minio_client.get_object(MINIO_BUCKET, path)
+def _ffmpeg_command() -> str:
+    return _resolve_ffmpeg() or "ffmpeg"
+
+
+def _probe_video_duration(video_path: str, fallback: float = 0) -> float:
+    ffprobe = _resolve_ffprobe()
+    if ffprobe:
         try:
-            return resp.read().decode("utf-8")
-        finally:
-            resp.close()
-            resp.release_conn()
+            probe = subprocess.run(
+                [
+                    ffprobe,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    video_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            if probe.stdout.strip():
+                return float(probe.stdout.strip())
+        except Exception:
+            pass
+
     try:
-        content = await loop.run_in_executor(None, _read)
-        return {"path": path, "content": content}
+        probe = subprocess.run(
+            [_ffmpeg_command(), "-i", video_path],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            stdin=subprocess.DEVNULL,
+        )
+        output = (probe.stderr or "") + "\n" + (probe.stdout or "")
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+        if match:
+            hours, minutes, seconds = match.groups()
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    except Exception:
+        pass
+    return fallback
+
+
+STORAGE_MODE = os.environ.get("HIPPODEMO_VLMAC_STORAGE", "basic-memory-local")
+PROJECT_DIR_CONFIGURED = bool(os.environ.get("HIPPODEMO_BASIC_MEMORY_PROJECT_DIR"))
+PROJECT_DIR = Path(
+    os.environ.get(
+        "HIPPODEMO_BASIC_MEMORY_PROJECT_DIR",
+        str(Path(__file__).resolve().parent / "data" / "basic_memory_project"),
+    )
+).expanduser()
+VIDEO_CONTEXT_DIR = PROJECT_DIR / "hippo" / "context" / "video"
+VIDEO_CHUNKS_DIR = VIDEO_CONTEXT_DIR / "chunks"
+VIDEO_SUMMARIES_DIR = VIDEO_CONTEXT_DIR / "summaries"
+ROLLING_CONTEXT_MD = VIDEO_CONTEXT_DIR / "rolling_context.md"
+ROLLING_CONTEXT_JSONL = VIDEO_CONTEXT_DIR / "rolling_context.jsonl"
+TEXT_EXTENSIONS = {".md", ".json", ".jsonl", ".txt"}
+BLOCKED_READ_PARTS = {"chunks"}
+IGNORE_PATTERNS = [
+    "hippo/context/video/chunks/**/*.webm",
+    "hippo/context/video/chunks/**/*.mp4",
+    "hippo/context/video/chunks/**/*.mov",
+    "hippo/context/video/chunks/**/*.mkv",
+    "hippo/context/video/chunks/**/*.jpg",
+    "hippo/context/video/chunks/**/*.jpeg",
+    "hippo/context/video/chunks/**/*.png",
+    "hippo/context/video/chunks/**/*.tmp",
+]
+
+
+def _system_timestamp() -> dict:
+    now = datetime.now().astimezone()
+    offset = now.strftime("%z")
+    timezone_offset = f"{offset[:3]}:{offset[3:]}" if offset else ""
+    return {
+        "system_time_iso": now.isoformat(timespec="seconds"),
+        "epoch_ms": int(now.timestamp() * 1000),
+        "timezone": timezone_offset or str(now.tzinfo or ""),
+    }
+
+
+def _safe_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip())
+    return cleaned.strip(".-") or "unknown"
+
+
+def _safe_timestamp(system_time_iso: str) -> str:
+    return _safe_component(system_time_iso.replace(":", "-"))
+
+
+def _storage_ready() -> bool:
+    return STORAGE_MODE == "basic-memory-local" and PROJECT_DIR_CONFIGURED and PROJECT_DIR.exists()
+
+
+def _ensure_storage_dirs() -> None:
+    if not PROJECT_DIR_CONFIGURED:
+        raise RuntimeError("HIPPODEMO_BASIC_MEMORY_PROJECT_DIR is required for vlmac local storage")
+    if not PROJECT_DIR.exists():
+        raise RuntimeError(f"Basic Memory project path does not exist: {PROJECT_DIR}")
+    VIDEO_CHUNKS_DIR.mkdir(parents=True, exist_ok=True)
+    VIDEO_SUMMARIES_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_ignore_rules()
+
+
+def _ensure_ignore_rules() -> None:
+    _append_ignore_patterns(PROJECT_DIR / ".gitignore", "HippoDEMO vlmac binary evidence chunks")
+    _append_ignore_patterns(PROJECT_DIR / ".bmignore", "HippoDEMO vlmac binary evidence chunks")
+
+
+def _append_ignore_patterns(ignore_path: Path, label: str) -> None:
+    existing = ignore_path.read_text(encoding="utf-8") if ignore_path.exists() else ""
+    additions = [pattern for pattern in IGNORE_PATTERNS if pattern not in existing.splitlines()]
+    if not additions:
+        return
+    prefix = "" if not existing or existing.endswith("\n") else "\n"
+    section = f"\n# {label}\n" + "\n".join(additions) + "\n"
+    ignore_path.write_text(existing + prefix + section, encoding="utf-8")
+
+
+def _relative_to_project(path: Path) -> str:
+    try:
+        return str(path.relative_to(PROJECT_DIR))
+    except ValueError:
+        return str(path)
+
+
+def _unique_stem(base_dir: Path, stem: str, suffixes: list[str]) -> str:
+    candidate = stem
+    index = 1
+    while any((base_dir / f"{candidate}{suffix}").exists() for suffix in suffixes):
+        index += 1
+        candidate = f"{stem}-{index}"
+    return candidate
+
+
+def _storage_entry(
+    *,
+    source_id: str,
+    prompt: str,
+    answer: str,
+    duration_seconds: float,
+    frames_used: int,
+    activity_events_count: int,
+    chunk_paths: list[str],
+    kind: str,
+) -> dict:
+    _ensure_storage_dirs()
+    stamp = _system_timestamp()
+    safe_source = _safe_component(source_id)
+    safe_ts = _safe_timestamp(stamp["system_time_iso"])
+    summary_dir = VIDEO_SUMMARIES_DIR / safe_source
+    summary_dir.mkdir(parents=True, exist_ok=True)
+    summary_stem = _unique_stem(summary_dir, safe_ts, [".md", ".json"])
+    summary_md = summary_dir / f"{summary_stem}.md"
+    summary_json = summary_dir / f"{summary_stem}.json"
+    rel_summary_md = _relative_to_project(summary_md)
+    rel_summary_json = _relative_to_project(summary_json)
+    rel_chunks = [_relative_to_project(Path(path)) for path in chunk_paths]
+    payload = {
+        **stamp,
+        "source_type": "video",
+        "source_id": source_id,
+        "kind": kind,
+        "prompt": prompt,
+        "answer": answer,
+        "duration_seconds": round(float(duration_seconds or 0), 3),
+        "frames_used": int(frames_used or 0),
+        "summary_path": rel_summary_md,
+        "summary_json_path": rel_summary_json,
+        "chunk_paths": rel_chunks,
+        "activity_events_count": int(activity_events_count or 0),
+    }
+    summary_md.write_text(
+        "\n".join(
+            [
+                f"# VLMac Video Summary {stamp['system_time_iso']}",
+                "",
+                "## Source",
+                f"- source_id: `{source_id}`",
+                f"- kind: {kind}",
+                f"- system_time: {stamp['system_time_iso']}",
+                f"- epoch_ms: {stamp['epoch_ms']}",
+                f"- duration_seconds: {payload['duration_seconds']}",
+                f"- frames_used: {payload['frames_used']}",
+                f"- activity_events_count: {payload['activity_events_count']}",
+                "",
+                "## Prompt",
+                prompt,
+                "",
+                "## Summary",
+                answer.strip(),
+                "",
+                "## Evidence Chunks",
+                *(f"- `{path}`" for path in rel_chunks),
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    summary_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    rolling_section = (
+        f"## {stamp['system_time_iso']} [video:{source_id}]\n\n"
+        f"- epoch_ms: {stamp['epoch_ms']}\n"
+        f"- timezone: {stamp['timezone']}\n"
+        f"- duration_seconds: {payload['duration_seconds']}\n"
+        f"- frames_used: {payload['frames_used']}\n"
+        f"- activity_events_count: {payload['activity_events_count']}\n"
+        f"- summary_path: `{rel_summary_md}`\n"
+        f"- chunk_paths: {', '.join(f'`{path}`' for path in rel_chunks) if rel_chunks else 'none'}\n\n"
+        f"{answer.strip()}\n\n---\n\n"
+    )
+    with ROLLING_CONTEXT_MD.open("a", encoding="utf-8") as handle:
+        handle.write(rolling_section)
+    with ROLLING_CONTEXT_JSONL.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    return payload
+
+
+def _save_video_chunk(source_id: str, video_bytes: bytes, ext: str, metadata: dict | None = None) -> Path:
+    _ensure_storage_dirs()
+    stamp = _system_timestamp()
+    safe_source = _safe_component(source_id)
+    safe_ts = _safe_timestamp(stamp["system_time_iso"])
+    chunk_dir = VIDEO_CHUNKS_DIR / safe_source
+    chunk_dir.mkdir(parents=True, exist_ok=True)
+    safe_ext = _safe_component(ext.lstrip(".") or "webm")
+    chunk_stem = _unique_stem(chunk_dir, safe_ts, [f".{safe_ext}"])
+    chunk_path = chunk_dir / f"{chunk_stem}.{safe_ext}"
+    chunk_path.write_bytes(video_bytes)
+    manifest = {
+        **stamp,
+        "source_id": source_id,
+        "chunk_path": _relative_to_project(chunk_path),
+        "size_bytes": len(video_bytes),
+        **(metadata or {}),
+    }
+    with (chunk_dir / "manifest.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(manifest, ensure_ascii=False) + "\n")
+    return chunk_path
+
+
+def _list_storage(kind: str, limit: int) -> list[dict]:
+    if not PROJECT_DIR.exists():
+        return []
+    if kind == "video_chunk":
+        roots = [VIDEO_CHUNKS_DIR]
+        patterns = ["*.webm", "*.mp4", "*.mov", "*.mkv", "manifest.jsonl"]
+    elif kind == "rolling_context":
+        roots = [VIDEO_CONTEXT_DIR]
+        patterns = ["rolling_context.md", "rolling_context.jsonl"]
+    else:
+        roots = [VIDEO_SUMMARIES_DIR]
+        patterns = ["*.md", "*.json"]
+    items: list[dict] = []
+    for root in roots:
+        if not root.exists():
+            continue
+        for pattern in patterns:
+            for path in root.rglob(pattern):
+                if not path.is_file():
+                    continue
+                stat = path.stat()
+                items.append(
+                    {
+                        "name": _relative_to_project(path),
+                        "path": _relative_to_project(path),
+                        "size": stat.st_size,
+                        "last_modified": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat(timespec="seconds"),
+                    }
+                )
+    items.sort(key=lambda item: item["last_modified"], reverse=True)
+    return items[: max(1, min(int(limit), 500))]
+
+
+def _safe_text_path(path_value: str) -> Path:
+    candidate = (PROJECT_DIR / path_value).resolve()
+    project_root = PROJECT_DIR.resolve()
+    context_root = (PROJECT_DIR / "hippo" / "context").resolve()
+    try:
+        candidate.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError("Access denied") from exc
+    try:
+        candidate.relative_to(context_root)
+    except ValueError as exc:
+        raise ValueError("Only hippo/context text files can be read") from exc
+    rel_parts = set(candidate.relative_to(project_root).parts)
+    if rel_parts & BLOCKED_READ_PARTS:
+        raise ValueError("Reading binary chunk storage is not allowed")
+    if candidate.suffix.lower() not in TEXT_EXTENSIONS:
+        raise ValueError("Only text storage files can be read")
+    return candidate
+
+
+@app.get("/api/storage/status")
+async def api_storage_status():
+    return {
+        "ok": _storage_ready(),
+        "storage": STORAGE_MODE,
+        "project_path_configured": PROJECT_DIR_CONFIGURED,
+        "project_path": str(PROJECT_DIR),
+        "video_context_path": str(VIDEO_CONTEXT_DIR),
+        "rolling_context_md": str(ROLLING_CONTEXT_MD),
+        "rolling_context_jsonl": str(ROLLING_CONTEXT_JSONL),
+    }
+
+
+@app.get("/api/storage/list")
+async def api_storage_list(kind: str = "video_summary", limit: int = 50):
+    return {"objects": _list_storage(kind, limit), "kind": kind}
+
+
+@app.get("/api/storage/read")
+async def api_storage_read(path: str):
+    try:
+        text_path = _safe_text_path(path)
+        return {"path": _relative_to_project(text_path), "content": text_path.read_text(encoding="utf-8", errors="replace")}
     except Exception as e:
         return {"error": str(e)}
 
 
+@app.get("/api/storage/stats")
+async def api_storage_stats():
+    objects = _list_storage("video_summary", 500) + _list_storage("rolling_context", 500)
+    total_size = sum(int(item.get("size") or 0) for item in objects)
+    return {"count": len(objects), "total_size": total_size, "project_path": str(PROJECT_DIR)}
+
+
+@app.get("/api/minio/list")
+async def api_minio_list(limit: int = 50):
+    """Compatibility alias for the legacy /api/minio/list route."""
+    return await api_storage_list(kind="video_summary", limit=limit)
+
+
+@app.get("/api/minio/read")
+async def api_minio_read(path: str):
+    """Compatibility alias for the legacy /api/minio/read route."""
+    return await api_storage_read(path)
+
+
 @app.get("/api/minio/stats")
 async def api_minio_stats():
-    """Get storage stats."""
-    loop = asyncio.get_event_loop()
-    def _stats():
-        total_size = 0
-        count = 0
-        for obj in minio_client.list_objects(MINIO_BUCKET, prefix=f"{MINIO_PREFIX}/", recursive=True):
-            total_size += obj.size or 0
-            count += 1
-        return {"count": count, "total_size": total_size}
-    return await loop.run_in_executor(None, _stats)
+    """Compatibility alias for the legacy /api/minio/stats route."""
+    return await api_storage_stats()
 
 
 # ---- Capture manager (shared per device) ----
@@ -160,7 +419,7 @@ class CaptureManager:
         """Capture a video segment using ffmpeg from V4L2 device."""
         w, h = self.resolution.split("x")
         cmd = [
-            "ffmpeg", "-y",
+            _ffmpeg_command(), "-y",
             "-f", "v4l2",
             "-video_size", f"{w}x{h}",
             "-i", self.device,
@@ -456,20 +715,11 @@ async def api_results(limit: int = 10):
 
 
 async def _task_loop(task_id: str):
-    """Main loop for a task: capture video → extract frames → query VLM → save to MinIO."""
+    """Main loop for a task: capture video → extract frames → query VLM → save to local Hippo context."""
     task = tasks.get(task_id)
     if not task or not task.capture:
         return
     client = httpx.AsyncClient()
-    # Reset context.md at task start
-    save_to_minio(
-        f"# VLMac 当前上下文\n\n"
-        f"**任务**: {task_id}\n"
-        f"**会话**: {task.session_filename}\n"
-        f"**启动时间**: {task.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-        f"**设备**: {task.device}\n\n---\n\n",
-        "context.md",
-    )
     try:
         while task.running:
             print(f"[task:{task_id}] Capturing {task.interval}s from {task.device}...")
@@ -481,6 +731,17 @@ async def _task_loop(task_id: str):
                 continue
 
             print(f"[task:{task_id}] Captured {len(video_bytes)/1024/1024:.1f}MB")
+            source_id = f"task_{task_id}"
+            chunk_path = _save_video_chunk(
+                source_id,
+                video_bytes,
+                "webm",
+                {
+                    "kind": "headless_task",
+                    "device": task.device,
+                    "duration_seconds": task.interval,
+                },
+            )
 
             # Extract frames
             frames, annotations, stats = await extract_frames_from_bytes(
@@ -536,47 +797,31 @@ async def _task_loop(task_id: str):
                 answer = f"[VLM error]: {e}"
                 print(f"[task:{task_id}] {answer}")
 
-            # Save to MinIO (append to session file)
-            ts = datetime.now(timezone.utc)
+            # Save to local Basic Memory project context.
             task.query_count += 1
-            section = ""
-            if task.query_count == 1:
-                section += (
-                    f"# VLMac 任务 {task_id} — {task.created_at.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-                    f"**设备**: {task.device}\n"
-                    f"**分辨率**: {task.resolution}\n"
-                    f"**采集间隔**: {task.interval}s\n"
-                    f"**灵敏度**: {task.scene_threshold}\n"
-                    f"**提示词**: {task.timer_prompt}\n\n"
-                    f"---\n\n"
-                )
-            section += (
-                f"## 查询 {task.query_count} — {ts.strftime('%H:%M:%S')}\n\n"
-                f"**视频时长**: {round(actual_dur)}s\n"
-                f"**提取帧数**: {n_sub}\n\n"
-                f"{answer}\n\n"
-                f"---\n\n"
-            )
+            storage_payload = {}
             try:
-                obj_path = append_to_minio(task.session_filename, section)
-                print(f"[task:{task_id}] Result appended to MinIO: {obj_path}")
-                # Append to context.md
-                ctx_section = (
-                    f"## [{task_id}] 查询 {task.query_count} — {ts.strftime('%H:%M:%S')}\n\n"
-                    f"**视频时长**: {round(actual_dur)}s | **提取帧数**: {n_sub}\n\n"
-                    f"{answer}\n\n---\n\n"
+                storage_payload = _storage_entry(
+                    source_id=source_id,
+                    prompt=task.timer_prompt,
+                    answer=answer,
+                    duration_seconds=actual_dur,
+                    frames_used=n_sub,
+                    activity_events_count=0,
+                    chunk_paths=[str(chunk_path)],
+                    kind="headless_task",
                 )
-                append_to_minio("context.md", ctx_section)
+                print(f"[task:{task_id}] Result saved: {storage_payload.get('summary_path')}")
             except Exception as e:
-                print(f"[task:{task_id}] MinIO save error: {e}")
-                obj_path = ""
+                print(f"[task:{task_id}] storage save error: {e}")
 
             result = {
-                "timestamp": ts.isoformat(),
+                "timestamp": storage_payload.get("system_time_iso") or datetime.now().astimezone().isoformat(timespec="seconds"),
                 "frames": n_sub,
                 "duration": round(actual_dur, 1),
                 "answer": answer[:500],
-                "minio_path": obj_path,
+                "summary_path": storage_payload.get("summary_path", ""),
+                "chunk_paths": storage_payload.get("chunk_paths", []),
             }
             task.results.append(result)
             if len(task.results) > 100:
@@ -757,16 +1002,7 @@ async def extract_frames_from_bytes(
             size_mb = len(video_bytes) / 1024 / 1024
             n_events = len(activity_events) if activity_events else 0
 
-            # Get actual video duration via ffprobe
-            try:
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error", "-show_entries",
-                     "format=duration", "-of", "default=noprint_wrappers=1:nokey=1",
-                     video_path],
-                    capture_output=True, text=True, timeout=30)
-                actual_duration = float(probe.stdout.strip()) if probe.stdout.strip() else video_duration
-            except Exception:
-                actual_duration = video_duration
+            actual_duration = _probe_video_duration(video_path, video_duration)
 
             print(f"[extract] Video: {size_mb:.1f}MB, ext={ext}, "
                   f"threshold={scene_threshold}, interval={min_interval}s, "
@@ -811,7 +1047,7 @@ async def extract_frames_from_bytes(
             )
             out_pattern = os.path.join(tmpdir, "key_%06d.jpg")
             cmd = [
-                "ffmpeg", "-i", video_path,
+                _ffmpeg_command(), "-i", video_path,
                 "-vf", vf, "-vsync", "vfr",
                 "-q:v", "3", out_pattern,
                 "-y", "-loglevel", "error",
@@ -833,7 +1069,7 @@ async def extract_frames_from_bytes(
             if total_extracted == 0:
                 fb_pattern = os.path.join(tmpdir, "fb_%06d.jpg")
                 fb_cmd = [
-                    "ffmpeg", "-i", video_path, "-vf",
+                    _ffmpeg_command(), "-i", video_path, "-vf",
                     "fps=0.5,scale='min(1024,iw)':'-1'",
                     "-q:v", "3",
                     fb_pattern, "-y", "-loglevel", "error",
@@ -889,19 +1125,10 @@ async def extract_frames_from_bytes(
 async def websocket_endpoint(ws: WebSocket):
     await ws.accept()
 
-    # Session-level MinIO file
+    # Session-level local storage source id.
     session_start = datetime.now(timezone.utc)
-    session_filename = f"session_{session_start.strftime('%Y%m%d_%H%M%S')}.md"
+    session_source_id = f"session_{session_start.strftime('%Y%m%d_%H%M%S')}"
     session_query_count = 0
-    # Reset context.md at session start
-    loop_init = asyncio.get_event_loop()
-    await loop_init.run_in_executor(
-        None, save_to_minio,
-        f"# VLMac 当前上下文\n\n"
-        f"**会话**: {session_filename}\n"
-        f"**启动时间**: {session_start.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n---\n\n",
-        "context.md",
-    )
 
     # Video stream accumulation: raw bytes from MediaRecorder chunks
     video_chunks: list[bytes] = []
@@ -945,7 +1172,6 @@ async def websocket_endpoint(ws: WebSocket):
         if not cfg:
             return
         task_query_count = 0
-        task_session_file = f"ws_task_{task_id}.md"
         try:
             while task_id in ws_task_configs:
                 await asyncio.sleep(cfg["interval"])
@@ -960,6 +1186,17 @@ async def websocket_endpoint(ws: WebSocket):
                 await ws.send_json({"type": "stream_reset"})
 
                 print(f"[ws_task:{task_id}] Processing {len(video_bytes)/1024:.0f}KB, {duration:.1f}s, {len(events)} events")
+                source_id = f"ws_task_{task_id}"
+                chunk_path = _save_video_chunk(
+                    source_id,
+                    video_bytes,
+                    ext,
+                    {
+                        "kind": "ws_timed_task",
+                        "duration_seconds": duration,
+                        "activity_events_count": len(events),
+                    },
+                )
 
                 frames, annotations, stats = await extract_frames_from_bytes(
                     video_bytes, ext,
@@ -1001,32 +1238,22 @@ async def websocket_endpoint(ws: WebSocket):
                 response_text = await stream_vlm_response(client, messages, ws, req_id)
                 task_query_count += 1
 
-                # Save to MinIO
+                # Save to local Basic Memory project context.
                 if response_text:
                     try:
                         session_query_count += 1
-                        ts = datetime.now(timezone.utc)
-                        section = ""
-                        if task_query_count == 1:
-                            section += (
-                                f"# 定时任务 {task_id}\n\n"
-                                f"**间隔**: {cfg['interval']}s\n"
-                                f"**提示词**: {cfg['prompt']}\n\n---\n\n"
-                            )
-                        section += (
-                            f"## 查询 {task_query_count} — {ts.strftime('%H:%M:%S')}\n\n"
-                            f"**视频时长**: {round(actual_dur)}s | **帧数**: {n_sub}\n\n"
-                            f"{response_text}\n\n---\n\n"
+                        _storage_entry(
+                            source_id=source_id,
+                            prompt=cfg["prompt"],
+                            answer=response_text,
+                            duration_seconds=actual_dur,
+                            frames_used=n_sub,
+                            activity_events_count=len(events),
+                            chunk_paths=[str(chunk_path)],
+                            kind="ws_timed_task",
                         )
-                        loop = asyncio.get_event_loop()
-                        await loop.run_in_executor(None, append_to_minio, task_session_file, section)
-                        ctx_section = (
-                            f"## [任务{task_id}] 查询 {task_query_count} — {ts.strftime('%H:%M:%S')}\n\n"
-                            f"{response_text}\n\n---\n\n"
-                        )
-                        await loop.run_in_executor(None, append_to_minio, "context.md", ctx_section)
                     except Exception as e:
-                        print(f"[ws_task:{task_id}] MinIO error: {e}")
+                        print(f"[ws_task:{task_id}] storage error: {e}")
 
                 await ws.send_json({
                     "type": "task_result", "task_id": task_id, "id": req_id,
@@ -1059,6 +1286,8 @@ async def websocket_endpoint(ws: WebSocket):
         annotations = []
         video_duration = 0
         extract_stats = {}
+        merged_events = activity_events
+        chunk_path: Path | None = None
 
         snapshot_bytes, ext, video_duration, snapshot_events = await _take_buffer_snapshot()
         if snapshot_bytes:
@@ -1070,6 +1299,16 @@ async def websocket_endpoint(ws: WebSocket):
 
             # Merge client-sent events with server-accumulated events
             merged_events = activity_events + snapshot_events
+            chunk_path = _save_video_chunk(
+                session_source_id,
+                snapshot_bytes,
+                ext,
+                {
+                    "kind": "ws_manual_query",
+                    "duration_seconds": video_duration,
+                    "activity_events_count": len(merged_events),
+                },
+            )
             frames, annotations, extract_stats = await extract_frames_from_bytes(
                 snapshot_bytes, ext, scene_threshold, min_interval_val,
                 activity_events=merged_events, video_duration=video_duration)
@@ -1111,34 +1350,23 @@ async def websocket_endpoint(ws: WebSocket):
             if response_text:
                 history.append({"role": "assistant", "content": response_text})
 
-        # Save result to MinIO (append to session file)
+        # Save result to local Basic Memory project context.
         if response_text:
             try:
                 session_query_count += 1
-                ts = datetime.now(timezone.utc)
                 actual_dur = extract_stats.get("actual_duration", video_duration)
-                section = ""
-                if session_query_count == 1:
-                    section += f"# VLMac 会话记录 — {session_start.strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
-                section += (
-                    f"## 查询 {session_query_count} — {ts.strftime('%H:%M:%S')}\n\n"
-                    f"**提问**: {user_text}\n"
-                    f"**视频时长**: {round(actual_dur)}s\n"
-                    f"**提取帧数**: {len(frames)}\n\n"
-                    f"{response_text}\n\n"
-                    f"---\n\n"
+                _storage_entry(
+                    source_id=session_source_id,
+                    prompt=user_text,
+                    answer=response_text,
+                    duration_seconds=actual_dur,
+                    frames_used=len(frames),
+                    activity_events_count=len(merged_events),
+                    chunk_paths=[str(chunk_path)] if chunk_path else [],
+                    kind="ws_manual_query",
                 )
-                loop = asyncio.get_event_loop()
-                await loop.run_in_executor(None, append_to_minio, session_filename, section)
-                ctx_section = (
-                    f"## 查询 {session_query_count} — {ts.strftime('%H:%M:%S')}\n\n"
-                    f"**提问**: {user_text}\n"
-                    f"**视频时长**: {round(actual_dur)}s | **提取帧数**: {len(frames)}\n\n"
-                    f"{response_text}\n\n---\n\n"
-                )
-                await loop.run_in_executor(None, append_to_minio, "context.md", ctx_section)
             except Exception as e:
-                print(f"[ws] MinIO save error: {e}")
+                print(f"[ws] storage save error: {e}")
 
     async def _query_wrapper(msg):
         """Wrapper that acquires the lock and handles errors."""
