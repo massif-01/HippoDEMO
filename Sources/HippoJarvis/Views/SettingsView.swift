@@ -19,6 +19,9 @@ struct SettingsView: View {
     @State private var aiManusTemperatureDraft = ""
     @State private var aiManusMaxTokensDraft = ""
     @State private var aiManusExtraHeadersDraft = ""
+    @State private var vlmacBaseURLDraft = ""
+    @State private var vlmacModelDraft = ""
+    @State private var vlmacKeyDraft = ""
     @State private var basicMemorySearchDraft = ""
 
     private let serviceColumns = [
@@ -53,12 +56,16 @@ struct SettingsView: View {
             await store.refreshVlmacPreflight()
             syncProviderDrafts()
             syncAiManusDrafts()
+            syncVlmacDrafts()
         }
         .onChange(of: store.ownscribeConfig) {
             syncProviderDrafts()
         }
         .onChange(of: store.aiManusConfig) {
             syncAiManusDrafts()
+        }
+        .onChange(of: store.vlmacConfig) {
+            syncVlmacDrafts()
         }
     }
 
@@ -280,6 +287,42 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
             }
+        }
+    }
+
+    private var vlmacProviderControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("VLM OpenAI API")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                statusBadge(
+                    store.vlmacConfig.vlmApiKeyConfigured == true ? "available" : "stopped",
+                    title: store.vlmacConfig.vlmApiKeyConfigured == true ? "API key saved" : "local or no-key"
+                )
+            }
+
+            LazyVGrid(columns: [
+                GridItem(.flexible(), spacing: 10),
+                GridItem(.flexible(), spacing: 10)
+            ], spacing: 10) {
+                providerField("OpenAI-compatible Base URL", text: $vlmacBaseURLDraft)
+                providerField("MODEL_NAME", text: $vlmacModelDraft)
+                providerSecureField("API Key", text: $vlmacKeyDraft)
+            }
+
+            HStack(spacing: 8) {
+                commandButton("Save VLM API", icon: "square.and.arrow.down", tone: .primary) {
+                    await saveVlmacConfig()
+                }
+                Text("Use the /v1 base URL. Restart applies changes to a running vlmac service.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .disabled(store.isBusy)
         }
     }
 
@@ -652,6 +695,8 @@ struct SettingsView: View {
 
                 Divider()
 
+                vlmacProviderControls
+
                 LazyVGrid(columns: [
                     GridItem(.flexible(), spacing: 10),
                     GridItem(.flexible(), spacing: 10)
@@ -661,6 +706,12 @@ struct SettingsView: View {
                         value: vlmacStorageDetail,
                         systemImage: "externaldrive",
                         color: .green
+                    )
+                    SignalMetric(
+                        title: "VLM API",
+                        value: vlmacVLMDetail,
+                        systemImage: "network",
+                        color: .purple
                     )
                     SignalMetric(
                         title: "Preflight",
@@ -681,7 +732,7 @@ struct SettingsView: View {
                         await store.vlmacStop()
                     }
                     commandButton("Preflight", icon: "checkmark.seal", tone: .quiet) {
-                        await store.refreshVlmacPreflight()
+                        await store.refreshVlmacPreflight(network: true)
                     }
                     Link(destination: URL(string: "http://127.0.0.1:59092")!) {
                         Label("Open WebUI", systemImage: "safari")
@@ -877,6 +928,10 @@ struct SettingsView: View {
             return String(detail[range.upperBound...]).trimmingCharacters(in: .whitespaces)
         }
         return store.basicMemoryStatus.projectPath ?? store.basicMemoryConfig.projectPath ?? "not configured"
+    }
+
+    private var vlmacVLMDetail: String {
+        store.vlmacConfig.vlmBaseUrl ?? "not configured"
     }
 
     private var basicMemoryRuntimeLabel: String {
@@ -1089,6 +1144,21 @@ struct SettingsView: View {
         asrModelDraft = store.ownscribeConfig.asrModel ?? ""
         summaryBaseURLDraft = store.ownscribeConfig.summaryBaseUrl ?? ""
         summaryModelDraft = store.ownscribeConfig.summaryModel ?? ""
+    }
+
+    private func saveVlmacConfig() async {
+        await store.updateVlmacConfig(
+            vlmBaseUrl: nonEmpty(vlmacBaseURLDraft),
+            vlmModel: nonEmpty(vlmacModelDraft),
+            vlmApiKey: nonEmpty(vlmacKeyDraft)
+        )
+        vlmacKeyDraft = ""
+        syncVlmacDrafts()
+    }
+
+    private func syncVlmacDrafts() {
+        vlmacBaseURLDraft = store.vlmacConfig.vlmBaseUrl ?? ""
+        vlmacModelDraft = store.vlmacConfig.vlmModel ?? ""
     }
 
     private func saveAiManusConfig() async {

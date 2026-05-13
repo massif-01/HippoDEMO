@@ -18,11 +18,7 @@ struct DashboardChatView: View {
             modelPicker
             HippoSymbolButton(systemName: "square.and.pencil", title: "New chat") {
                 tab = "Chat"
-                if manusAvailable {
-                    Task { await store.newManusThread() }
-                } else {
-                    store.startLocalManusDraftThread()
-                }
+                Task { await store.newChatThread() }
             }
         } content: {
             dashboardContent
@@ -124,8 +120,8 @@ struct DashboardChatView: View {
 
     private var sessionPill: some View {
         HStack(spacing: 8) {
-            HippoStatusDot(color: manusAvailable ? .green : .red, pulse: manusAvailable && store.snapshot.currentSession != nil, size: 6)
-            Text("Manus \(manusStatus) · \(sessionPillTitle)")
+            HippoStatusDot(color: chatRuntimeColor, pulse: store.snapshot.currentSession != nil, size: 6)
+            Text("Chat runtime · \(chatRuntimeStatus) · \(sessionPillTitle)")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Button("Attach") {
@@ -148,7 +144,7 @@ struct DashboardChatView: View {
                     .font(.system(size: 24, weight: .semibold))
                     .lineLimit(2)
                 HStack(spacing: 8) {
-                    HippoCapsuleLabel(title: manusStatus, color: manusAvailable ? .green : .red, systemImage: "circle.fill")
+                    HippoCapsuleLabel(title: chatRuntimeStatus, color: chatRuntimeColor, systemImage: "circle.fill")
                     Text("\(store.manusMessages.count) messages")
                         .font(.system(size: 12))
                         .foregroundStyle(.secondary)
@@ -222,7 +218,7 @@ struct DashboardChatView: View {
         HStack(spacing: 10) {
             Image(systemName: "wrench.and.screwdriver.fill")
                 .foregroundStyle(.secondary)
-            Text(manusAvailable ? "Connect more tools to Hippo" : "Manus unavailable")
+            Text("Connect more tools to Hippo")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Spacer()
@@ -279,7 +275,7 @@ struct DashboardChatView: View {
             HippoInsetPanel(radius: 12) {
                 VStack(spacing: 0) {
                     if store.manusThreads.isEmpty {
-                        Text("No recent Manus threads")
+                        Text("No recent chat threads")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -301,7 +297,7 @@ struct DashboardChatView: View {
     private var recentContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                sectionHeader("Recent Manus Threads", subtitle: "\(store.manusThreads.count) local Hippo thread records")
+                sectionHeader("Recent Chat Threads", subtitle: "\(store.manusThreads.count) local Hippo thread records")
                 recentThreads
             }
             .frame(maxWidth: 820, alignment: .leading)
@@ -313,13 +309,13 @@ struct DashboardChatView: View {
     private var templatesContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 14) {
-                sectionHeader("Prompt Templates", subtitle: "Click a template to send it to Manus")
+                sectionHeader("Prompt Templates", subtitle: "Click a template to send it to Chat")
                 suggestionChips
                 HippoInsetPanel {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Local draft fallback")
+                        Text("Chat runtime")
                             .font(.system(size: 13, weight: .semibold))
-                        Text("When Manus is unavailable, template clicks are kept as local draft messages instead of disappearing.")
+                        Text("Templates are sent through the unified Hippo Chat route and can fall back to the local agent runtime.")
                             .font(.system(size: 12))
                             .foregroundStyle(.secondary)
                     }
@@ -715,20 +711,12 @@ struct DashboardChatView: View {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         draft = ""
-        if manusAvailable {
-            Task { await store.sendManusMessage(text) }
-        } else {
-            store.queueLocalManusDraft(text)
-        }
+        Task { await store.sendChatMessage(text) }
     }
 
     private func sendSuggestion(_ title: String) {
         let text = prompt(for: title)
-        if manusAvailable {
-            Task { await store.sendManusMessage(text) }
-        } else {
-            store.queueLocalManusDraft(text)
-        }
+        Task { await store.sendChatMessage(text) }
     }
 
     private func openSandboxURL(interactive: Bool) {
@@ -800,27 +788,19 @@ struct DashboardChatView: View {
         !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !store.isBusy
     }
 
-    private var manusAvailable: Bool {
-        !manusStatus.localizedCaseInsensitiveContains("unavailable")
-            && !manusStatus.localizedCaseInsensitiveContains("offline")
-            && !manusStatus.localizedCaseInsensitiveContains("error")
-            && !manusStatus.localizedCaseInsensitiveContains("auth")
+    private var chatRuntimeColor: Color {
+        store.snapshot.jarvisState == .error ? .orange : .green
     }
 
-    private var manusStatus: String {
-        if store.aiManusStatus.ok != true {
-            return "unavailable"
-        }
+    private var chatRuntimeStatus: String {
         if store.snapshot.jarvisState == .error {
-            return "unavailable"
+            return "needs attention"
         }
-        return store.aiManusStatus.status.isEmpty ? "available" : store.aiManusStatus.status
+        return "auto route"
     }
 
     private var composerPlaceholder: String {
-        manusAvailable
-            ? "Assign a task, ask Hippo to draft something, or describe what to capture next..."
-            : "Manus is unavailable. You can keep a draft here until the agent reconnects."
+        "Assign a task, ask Hippo to draft something, or describe what to capture next..."
     }
 
     private var sessionPillTitle: String {
@@ -838,7 +818,7 @@ struct DashboardChatView: View {
 
     private var currentThreadSubtitle: String {
         guard let thread = store.currentManusThread else {
-            return "No Manus thread selected"
+            return "No chat thread selected"
         }
         let title = thread.title?.isEmpty == false ? thread.title! : String((thread.manusSessionId ?? thread.sessionId).suffix(8))
         return "Thread \(title) · \(thread.status)"
@@ -846,12 +826,12 @@ struct DashboardChatView: View {
 
     private var modelTitle: String {
         if let provider = store.aiManusConfig.authProvider, !provider.isEmpty {
-            return "Manus · \(provider)"
+            return "Chat · \(provider)"
         }
         if let apiBaseURL = store.aiManusConfig.apiBaseUrl, !apiBaseURL.isEmpty {
-            return "Manus · \(apiBaseURL)"
+            return "Chat · \(apiBaseURL)"
         }
-        return "Hippo Mini · local"
+        return "Hippo Chat · auto"
     }
 
     private var toolIcons: [(systemName: String, color: Color)] {

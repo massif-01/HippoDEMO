@@ -22,6 +22,7 @@ app = FastAPI()
 
 VLLM_BASE = os.environ.get("VLLM_BASE_URL", "http://localhost:58000")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "RM-01 VLM")
+VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "").strip()
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -32,6 +33,20 @@ async def index():
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+
+def _vllm_endpoint(path: str) -> str:
+    base = VLLM_BASE.rstrip("/")
+    suffix = path.lstrip("/")
+    if base.endswith("/v1"):
+        return f"{base}/{suffix}"
+    return f"{base}/v1/{suffix}"
+
+
+def _vllm_headers() -> dict[str, str] | None:
+    if not VLLM_API_KEY:
+        return None
+    return {"Authorization": f"Bearer {VLLM_API_KEY}"}
 
 
 def _resolve_ffmpeg() -> str | None:
@@ -778,13 +793,14 @@ async def _task_loop(task_id: str):
             print(f"[task:{task_id}] Querying VLM with {len(frames)} frames...")
             try:
                 resp = await client.post(
-                    f"{VLLM_BASE}/v1/chat/completions",
+                    _vllm_endpoint("chat/completions"),
                     json={
                         "model": VLLM_MODEL,
                         "messages": messages,
                         "max_tokens": 2048,
                         "temperature": 0.7,
                     },
+                    headers=_vllm_headers(),
                     timeout=120.0,
                 )
                 if resp.status_code == 200:
@@ -857,8 +873,9 @@ async def stream_vlm_response(
     try:
         async with client.stream(
             "POST",
-            f"{VLLM_BASE}/v1/chat/completions",
+            _vllm_endpoint("chat/completions"),
             json=payload,
+            headers=_vllm_headers(),
             timeout=120.0,
         ) as resp:
             if resp.status_code != 200:

@@ -279,6 +279,50 @@ struct OwnscribeConfigRequest: Codable, Sendable {
     var apiKey: String?
 }
 
+struct VlmacConfig: Codable, Equatable, Sendable {
+    var baseUrl: String?
+    var host: String?
+    var port: Int?
+    var vlmacDir: String?
+    var bundledRuntimePath: String?
+    var devRuntimePath: String?
+    var pythonPath: String?
+    var projectPath: String?
+    var storage: String?
+    var vlmProvider: String?
+    var vlmBaseUrl: String?
+    var vlmModel: String?
+    var vlmApiKeyConfigured: Bool?
+    var providerConfigPath: String?
+    var logPath: String?
+    var pidPath: String?
+
+    static let empty = VlmacConfig(
+        baseUrl: nil,
+        host: nil,
+        port: nil,
+        vlmacDir: nil,
+        bundledRuntimePath: nil,
+        devRuntimePath: nil,
+        pythonPath: nil,
+        projectPath: nil,
+        storage: nil,
+        vlmProvider: nil,
+        vlmBaseUrl: nil,
+        vlmModel: nil,
+        vlmApiKeyConfigured: false,
+        providerConfigPath: nil,
+        logPath: nil,
+        pidPath: nil
+    )
+}
+
+struct VlmacConfigRequest: Codable, Sendable {
+    var vlmBaseUrl: String?
+    var vlmModel: String?
+    var vlmApiKey: String?
+}
+
 struct OwnscribeAudioDevice: Identifiable, Codable, Equatable, Sendable {
     var name: String
     var isDefault: Bool

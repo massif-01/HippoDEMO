@@ -199,6 +199,12 @@ class OwnscribeConfigRequest(BaseModel):
     api_key: Optional[str] = None
 
 
+class VlmacConfigRequest(BaseModel):
+    vlm_base_url: Optional[str] = None
+    vlm_model: Optional[str] = None
+    vlm_api_key: Optional[str] = None
+
+
 class AiManusConfigRequest(BaseModel):
     base_url: Optional[str] = None
     frontend_url: Optional[str] = None
