@@ -17,11 +17,11 @@ final class OrchestratorLauncher {
 
         try start()
 
-        for _ in 0..<30 {
+        for _ in 0..<240 {
             if (try? await client.health()) == true {
                 return
             }
-            try await Task.sleep(nanoseconds: 200_000_000)
+            try await Task.sleep(nanoseconds: 500_000_000)
         }
 
         log("health did not become ready")
@@ -40,14 +40,11 @@ final class OrchestratorLauncher {
             return
         }
 
-        let runtime = root.appending(path: ".runtime", directoryHint: .isDirectory)
+        let runtime = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appending(path: "HippoDEMO", directoryHint: .isDirectory)
         try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
 
-        let logURL = runtime.appending(path: "orchestrator-app.log")
         let pidURL = runtime.appending(path: "orchestrator-app.pid")
-        if !FileManager.default.fileExists(atPath: logURL.path) {
-            FileManager.default.createFile(atPath: logURL.path, contents: nil)
-        }
 
         let next = Process()
         let python = pythonURL(root: root)
@@ -59,10 +56,13 @@ final class OrchestratorLauncher {
         }
         next.currentDirectoryURL = root
         var environment = ProcessInfo.processInfo.environment
+        let runtimeBin = root.appending(path: ".runtime/python/bin", directoryHint: .isDirectory)
         environment["PYTHONPATH"] = root.path
         environment["HIPPODEMO_ROOT"] = root.path
         environment["HIPPODEMO_PYTHON"] = python.path
+        environment["OWNSCRIBE_PYTHON"] = python.path
         let bundledPathEntries = [
+            runtimeBin.path,
             root.appending(path: "orchestrator-runtime/bin").path,
             root.appending(path: "vlmac-runtime/bin").path
         ].filter { FileManager.default.fileExists(atPath: $0) }
@@ -71,8 +71,7 @@ final class OrchestratorLauncher {
         }
         next.environment = environment
 
-        let output = try FileHandle(forWritingTo: logURL)
-        try output.seekToEnd()
+        let output = FileHandle(forWritingAtPath: "/dev/null")
         let input = FileHandle(forReadingAtPath: "/dev/null")
         next.standardOutput = output
         next.standardError = output
@@ -85,29 +84,43 @@ final class OrchestratorLauncher {
 
         log("starting uvicorn with \(python.path)")
         try next.run()
-        try "\(next.processIdentifier)\n".write(to: pidURL, atomically: true, encoding: .utf8)
+        try? "\(next.processIdentifier)\n".write(to: pidURL, atomically: true, encoding: .utf8)
         process = next
         log("started uvicorn pid \(next.processIdentifier)")
     }
 
     private func projectRootURL() -> URL? {
-        let bundleRoot = Bundle.main.bundleURL
-            .deletingLastPathComponent()
-            .deletingLastPathComponent()
-        if FileManager.default.fileExists(atPath: bundleRoot.appending(path: "orchestrator/main.py").path) {
-            return bundleRoot
-        }
-
-        let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        if FileManager.default.fileExists(atPath: cwd.appending(path: "orchestrator/main.py").path) {
-            return cwd
+        let starts = [
+            Bundle.main.bundleURL,
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true),
+        ]
+        for start in starts {
+            if let root = firstProjectRoot(from: start) {
+                return root
+            }
         }
 
         return nil
     }
 
+    private func firstProjectRoot(from url: URL) -> URL? {
+        var current = url.hasDirectoryPath ? url : url.deletingLastPathComponent()
+        for _ in 0..<8 {
+            if FileManager.default.fileExists(atPath: current.appending(path: "orchestrator/main.py").path) {
+                return current
+            }
+            let next = current.deletingLastPathComponent()
+            if next.path == current.path {
+                break
+            }
+            current = next
+        }
+        return nil
+    }
+
     private func pythonURL(root: URL) -> URL {
         let candidates = [
+            root.appending(path: ".runtime/python/bin/python").path,
             root.appending(path: "orchestrator-runtime/bin/python").path,
             root.appending(path: "orchestrator/.venv/bin/python").path,
             "/opt/homebrew/Caskroom/miniconda/base/bin/python",
@@ -124,20 +137,7 @@ final class OrchestratorLauncher {
     }
 
     private func log(_ message: String) {
-        let root = projectRootURL()
-        let fallback = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-        let runtime = (root ?? fallback).appending(path: ".runtime", directoryHint: .isDirectory)
-        try? FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true)
-        let line = "[\(Date().formatted(date: .omitted, time: .standard))] \(message)\n"
-        let url = runtime.appending(path: "orchestrator-launcher.log")
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
-        }
-        if let handle = try? FileHandle(forWritingTo: url) {
-            _ = try? handle.seekToEnd()
-            try? handle.write(contentsOf: Data(line.utf8))
-            try? handle.close()
-        }
+        NSLog("[HippoJarvis] %@", message)
     }
 
 }

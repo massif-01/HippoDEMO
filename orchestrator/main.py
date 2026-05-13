@@ -1675,9 +1675,7 @@ async def jarvis_off():
     if not store.state.current_session:
         raise HTTPException(status_code=409, detail="No active session to stop.")
     session_id = store.state.current_session.id
-    openchronicle_service = await openchronicle_adapter.capture_once()
-    if openchronicle_service.status == "error":
-        openchronicle_service = await openchronicle_adapter.timeline_tick()
+    openchronicle_service = await openchronicle_adapter.stop()
     await _stop_voice_context_worker(session_id)
     ownscribe_result, ownscribe_service = await _call_ownscribe(
         ("stop_recording", "stop", "finish", "finalize"),
@@ -1700,7 +1698,6 @@ async def jarvis_off():
                 session_id=session_id,
             )
     vlmac_service = await vlmac_adapter.status()
-    surface = await cua_driver_adapter.target_surface()
     async with store._lock:
         session = store.state.current_session
         if not session:
@@ -1728,7 +1725,6 @@ async def jarvis_off():
             persisted_artifacts.append(await store.add_artifact(artifact, session=session))
             await store.publish("artifact_ready", to_dict(artifact), session_id=session.id)
         task = build_active_task(session, persisted_artifacts)
-        _sync_task_target_surface(task, surface)
         await store.add_active_task(task)
         store.state.jarvis_state = JarvisState.INTERVENTION_READY
         session.state = JarvisState.INTERVENTION_READY
@@ -1743,6 +1739,7 @@ async def jarvis_off():
                 "service": to_dict(ownscribe_service),
                 "artifact_count": len(persisted_artifacts),
                 "fallback": not ownscribe_ok,
+                "target_surface": "deferred_until_user_detection_or_insert",
             },
             session_id=session.id,
         )
@@ -1774,10 +1771,10 @@ async def jarvis_off():
             )
         await store.publish("active_task_generated", to_dict(task), session_id=session.id)
         await store.publish(
-            "intervention_signal_detected" if surface.safe else "intervention_signal_waiting",
+            "intervention_signal_waiting",
             {
                 "task_id": task.id,
-                "target_surface": _target_surface_payload(surface),
+                "reason": "target_surface_deferred_until_user_detection_or_insert",
             },
             session_id=session.id,
         )
