@@ -11,6 +11,24 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var ownscribeDevices: OwnscribeAudioDevicesResponse = .empty
     @Published private(set) var ownscribePreflight: OwnscribePreflight = .empty
     @Published private(set) var cuaTargetSurface: CuaTargetSurface = .empty
+    @Published private(set) var aiManusConfig: AiManusConfig = .empty
+    @Published private(set) var aiManusStatus: AiManusStatus = .empty
+    @Published private(set) var aiManusRuntimeLastCommand: AiManusRuntimeCommandResponse?
+    @Published private(set) var aiManusRuntimeLogs: AiManusRuntimeLogsResponse = .empty
+    @Published private(set) var manusThreads: [ManusThread] = []
+    @Published private(set) var currentManusThread: ManusThread?
+    @Published private(set) var manusMessages: [ManusMessage] = []
+    @Published private(set) var manusPlan: [ManusPlanStep] = []
+    @Published private(set) var manusTools: [ManusToolEvent] = []
+    @Published private(set) var manusSandboxAccess: ManusSandboxAccess?
+    @Published private(set) var manusFilesResponse: ManusFilesResponse = .empty
+    @Published private(set) var manusFilePreview: ManusFilePreview?
+    @Published private(set) var manusFileDownloadLink: ManusFileDownloadLink?
+    @Published private(set) var isLoadingManusSandboxAccess = false
+    @Published private(set) var isLoadingManusFiles = false
+    @Published private(set) var isLoadingManusFilePreview = false
+    @Published private(set) var isLoadingManusFileDownloadLink = false
+    @Published private(set) var isRunningAiManusRuntimeCommand = false
     @Published private(set) var isBusy = false
     @Published var language: AppLanguage {
         didSet {
@@ -24,6 +42,7 @@ final class AppStateStore: ObservableObject {
     private let skillStore = SkillStore()
     private var bootstrapped = false
     private var eventsTask: Task<Void, Never>?
+    private var manusChatTask: Task<Void, Never>?
 
     init() {
         let storedLanguage = UserDefaults.standard.string(forKey: Self.languageKey)
@@ -61,6 +80,8 @@ final class AppStateStore: ObservableObject {
     var canJarvisOff: Bool { snapshot.currentSession != nil && snapshot.jarvisState != .idle }
     var canCaptureSkill: Bool { snapshot.jarvisState == .meetingActive }
     var canFinishCapture: Bool { snapshot.jarvisState == .sopMarking }
+    var manusConfig: AiManusConfig { aiManusConfig }
+    var manusFiles: [ManusFileInfo] { manusFilesResponse.files }
     var canInsertCurrentTask: Bool {
         guard let task = snapshot.currentTask, cuaTargetSurface.safe, !isBusy else { return false }
         let insertStatus = task.proposedActions.first?.status ?? "proposed"
@@ -98,6 +119,256 @@ final class AppStateStore: ObservableObject {
             lastError = nil
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    func refreshManus() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            var config = try await client.aiManusConfig()
+            aiManusStatus = try await client.aiManusStatus()
+            config.status = aiManusStatus.status
+            aiManusConfig = config
+            manusThreads = try await client.manusSessions().sessions
+            if let currentManusThread {
+                self.currentManusThread = manusThreads.first { $0.id == currentManusThread.id } ?? currentManusThread
+            }
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func updateAiManusConfig(
+        baseUrl: String? = nil,
+        frontendUrl: String? = nil,
+        authProvider: String? = nil,
+        timeoutSeconds: Double? = nil,
+        apiBase: String? = nil,
+        modelName: String? = nil,
+        apiKey: String? = nil,
+        temperature: Double? = nil,
+        maxTokens: Int? = nil,
+        extraHeaders: String? = nil
+    ) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let request = AiManusConfigUpdateRequest(
+                baseUrl: baseUrl,
+                frontendUrl: frontendUrl,
+                authProvider: authProvider,
+                apiKey: apiKey,
+                timeoutSeconds: timeoutSeconds,
+                apiBase: apiBase,
+                modelName: modelName,
+                temperature: temperature,
+                maxTokens: maxTokens,
+                extraHeaders: extraHeaders
+            )
+            var config = try await client.updateAiManusConfig(request)
+            aiManusStatus = try await client.aiManusStatus()
+            config.status = aiManusStatus.status
+            aiManusConfig = config
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func aiManusRuntimeStart(build: Bool = false) async {
+        await runAiManusRuntimeCommand {
+            try await self.client.aiManusRuntimeStart(build: build)
+        }
+    }
+
+    func aiManusRuntimeStop() async {
+        await runAiManusRuntimeCommand {
+            try await self.client.aiManusRuntimeStop()
+        }
+    }
+
+    func aiManusRuntimeRestart(build: Bool = false) async {
+        await runAiManusRuntimeCommand {
+            try await self.client.aiManusRuntimeRestart(build: build)
+        }
+    }
+
+    func refreshAiManusRuntimeLogs() async {
+        do {
+            aiManusRuntimeLogs = try await client.aiManusRuntimeLogs(limit: 80)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func newManusThread() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let response = try await client.createManusSession()
+            manusThreads = try await client.manusSessions().sessions
+            try await loadManusThreadWithoutBusy(response.sessionId)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadManusThread(_ thread: ManusThread) async {
+        await loadManusThread(thread.id)
+    }
+
+    func loadManusThread(_ sessionID: String) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            try await loadManusThreadWithoutBusy(sessionID)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func sendManusMessage(_ content: String, attachments: [JSONValue]? = nil) async {
+        let message = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+
+        manusChatTask?.cancel()
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let sessionID: String
+            if let currentManusThread {
+                sessionID = currentManusThread.id
+            } else {
+                let response = try await client.createManusSession()
+                sessionID = response.sessionId
+                manusThreads = try await client.manusSessions().sessions
+                try await loadManusThreadWithoutBusy(sessionID)
+            }
+
+            appendLocalManusMessage(role: "user", content: message, attachments: attachments)
+            try await client.streamManusChat(sessionID: sessionID, message: message, attachments: attachments) { event in
+                await MainActor.run {
+                    self.applyManusStreamEvent(event)
+                }
+            }
+            manusThreads = try await client.manusSessions().sessions
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func queueLocalManusDraft(_ content: String, attachments: [JSONValue]? = nil) {
+        let message = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+
+        ensureLocalDraftThread(title: message)
+        appendLocalManusMessage(role: "user", content: message, attachments: attachments)
+        lastError = "Manus is unavailable. Draft was kept locally and can be sent after reconnect."
+    }
+
+    func startLocalManusDraftThread() {
+        ensureLocalDraftThread(title: "Local draft")
+        lastError = nil
+    }
+
+    func stopManusThread() async {
+        guard let currentManusThread else { return }
+        manusChatTask?.cancel()
+        manusChatTask = nil
+
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            try await client.stopManusSession(sessionID: currentManusThread.id)
+            manusThreads = try await client.manusSessions().sessions
+            self.currentManusThread = manusThreads.first { $0.id == currentManusThread.id } ?? currentManusThread
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadManusSandboxAccess() async {
+        guard let currentManusThread else {
+            resetManusPhaseTwoState()
+            return
+        }
+
+        isLoadingManusSandboxAccess = true
+        defer { isLoadingManusSandboxAccess = false }
+
+        do {
+            manusSandboxAccess = try await client.manusSandboxAccess(sessionID: currentManusThread.id)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadManusFiles() async {
+        guard let currentManusThread else {
+            resetManusPhaseTwoState()
+            return
+        }
+
+        isLoadingManusFiles = true
+        defer { isLoadingManusFiles = false }
+
+        do {
+            manusFilesResponse = try await client.manusFiles(sessionID: currentManusThread.id)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadManusFilePreview(_ file: ManusFileInfo) async {
+        guard let currentManusThread else { return }
+        guard file.path?.isEmpty == false || file.filePath?.isEmpty == false else {
+            lastError = "Manus file preview requires a sandbox file path."
+            return
+        }
+
+        isLoadingManusFilePreview = true
+        defer { isLoadingManusFilePreview = false }
+
+        do {
+            manusFilePreview = try await client.manusFilePreview(sessionID: currentManusThread.id, file: file)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadManusDownloadLink(for file: ManusFileInfo) async -> ManusFileDownloadLink? {
+        guard !file.fileIdentifier.isEmpty else {
+            lastError = "Manus file is missing a file id."
+            return nil
+        }
+
+        isLoadingManusFileDownloadLink = true
+        defer { isLoadingManusFileDownloadLink = false }
+
+        do {
+            let link = try await client.manusFileDownloadLink(fileID: file.fileIdentifier)
+            manusFileDownloadLink = link
+            lastError = nil
+            return link
+        } catch {
+            lastError = error.localizedDescription
+            return nil
         }
     }
 
@@ -300,6 +571,230 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    private func runAiManusRuntimeCommand(
+        _ operation: @escaping () async throws -> AiManusRuntimeCommandResponse
+    ) async {
+        isRunningAiManusRuntimeCommand = true
+        defer { isRunningAiManusRuntimeCommand = false }
+
+        do {
+            let response = try await operation()
+            aiManusRuntimeLastCommand = response
+            applyAiManusRuntimeService(response.service)
+            aiManusRuntimeLogs = (try? await client.aiManusRuntimeLogs(limit: 80)) ?? aiManusRuntimeLogs
+            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            await refreshManus()
+            aiManusRuntimeLogs = (try? await client.aiManusRuntimeLogs(limit: 80)) ?? aiManusRuntimeLogs
+            await refreshEventHistory()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func applyAiManusRuntimeService(_ service: ServiceStatus?) {
+        guard let service else { return }
+        aiManusStatus = AiManusStatus(
+            ok: service.status == "online",
+            status: service.status,
+            detail: service.detail,
+            config: aiManusConfig
+        )
+    }
+
+    private func loadManusThreadWithoutBusy(_ sessionID: String) async throws {
+        let detail = try await client.manusThreadDetail(sessionID: sessionID)
+        currentManusThread = ManusThread(
+            sessionId: detail.sessionId,
+            manusSessionId: detail.manusSessionId,
+            title: detail.title ?? detail.remote?.title,
+            status: detail.remoteStatus ?? detail.remote?.status ?? detail.status,
+            latestMessage: nil,
+            latestMessageAt: nil,
+            unreadMessageCount: nil,
+            isShared: detail.isShared
+        )
+        if !manusThreads.contains(where: { $0.id == detail.sessionId }), let currentManusThread {
+            manusThreads.insert(currentManusThread, at: 0)
+        }
+        manusMessages = []
+        manusPlan = []
+        manusTools = []
+        resetManusPhaseTwoState()
+        if let messages = detail.messages {
+            manusMessages = messages
+        }
+        for event in detail.events {
+            if detail.messages?.isEmpty == false, event.event == "message" {
+                continue
+            }
+            applyManusStreamEvent(event)
+        }
+    }
+
+    private func appendLocalManusMessage(role: String, content: String, attachments: [JSONValue]? = nil) {
+        let now = Int(Date().timeIntervalSince1970)
+        manusMessages.append(
+            ManusMessage(
+                id: "local_\(role)_\(now)_\(manusMessages.count)",
+                role: role,
+                content: content,
+                timestamp: now,
+                eventId: nil,
+                attachments: attachments
+            )
+        )
+    }
+
+    private func ensureLocalDraftThread(title: String) {
+        if currentManusThread != nil { return }
+
+        let now = Date()
+        let timestamp = Int(now.timeIntervalSince1970)
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayTitle = trimmedTitle.isEmpty ? "Local draft" : String(trimmedTitle.prefix(48))
+        let thread = ManusThread(
+            sessionId: "local-\(UUID().uuidString)",
+            title: displayTitle,
+            status: "local_draft",
+            latestMessage: trimmedTitle,
+            latestMessageAt: timestamp,
+            unreadMessageCount: 0,
+            isShared: false,
+            createdAt: ISO8601DateFormatter().string(from: now),
+            updatedAt: ISO8601DateFormatter().string(from: now)
+        )
+        currentManusThread = thread
+        manusThreads.insert(thread, at: 0)
+        manusMessages = []
+        manusPlan = []
+        manusTools = []
+    }
+
+    private func applyManusStreamEvent(_ event: ManusStreamEvent) {
+        guard let data = event.data else { return }
+        switch event.event {
+        case "message":
+            if let message = makeManusMessage(from: data) {
+                manusMessages.append(message)
+            }
+        case "plan":
+            manusPlan = planSteps(from: data)
+        case "step":
+            if let step = makePlanStep(from: data) {
+                if let index = manusPlan.firstIndex(where: { $0.id == step.id }) {
+                    manusPlan[index] = step
+                } else {
+                    manusPlan.append(step)
+                }
+            }
+        case "tool":
+            if let tool = makeToolEvent(from: data) {
+                if let index = manusTools.firstIndex(where: { $0.id == tool.id }) {
+                    manusTools[index] = tool
+                } else {
+                    manusTools.append(tool)
+                }
+            }
+        case "title":
+            updateCurrentManusTitle(from: data)
+        case "error":
+            lastError = stringField("error", in: data)
+        default:
+            break
+        }
+    }
+
+    private func makeManusMessage(from value: JSONValue) -> ManusMessage? {
+        guard case .object(let object) = value else { return nil }
+        let content = stringField("content", in: object) ?? stringField("message", in: object)
+        guard let content else { return nil }
+        let eventId = stringField("event_id", in: object) ?? stringField("eventId", in: object)
+        let timestamp = intField("timestamp", in: object)
+        return ManusMessage(
+            id: eventId ?? "message_\(timestamp ?? Int(Date().timeIntervalSince1970))_\(manusMessages.count)",
+            role: stringField("role", in: object) ?? "assistant",
+            content: content,
+            timestamp: timestamp,
+            eventId: eventId,
+            attachments: arrayField("attachments", in: object)
+        )
+    }
+
+    private func planSteps(from value: JSONValue) -> [ManusPlanStep] {
+        guard case .object(let object) = value, let steps = arrayField("steps", in: object) else {
+            return []
+        }
+        return steps.compactMap(makePlanStep)
+    }
+
+    private func makePlanStep(from value: JSONValue) -> ManusPlanStep? {
+        guard case .object(let object) = value, let id = stringField("id", in: object) else { return nil }
+        return ManusPlanStep(
+            id: id,
+            description: stringField("description", in: object) ?? "",
+            status: stringField("status", in: object) ?? "pending",
+            timestamp: intField("timestamp", in: object),
+            eventId: stringField("event_id", in: object) ?? stringField("eventId", in: object)
+        )
+    }
+
+    private func makeToolEvent(from value: JSONValue) -> ManusToolEvent? {
+        guard case .object(let object) = value else { return nil }
+        let callID = stringField("tool_call_id", in: object) ?? stringField("toolCallId", in: object)
+        guard let callID else { return nil }
+        return ManusToolEvent(
+            toolCallId: callID,
+            name: stringField("name", in: object) ?? "",
+            function: stringField("function", in: object) ?? "",
+            status: stringField("status", in: object) ?? "calling",
+            args: objectField("args", in: object) ?? [:],
+            content: object["content"],
+            timestamp: intField("timestamp", in: object),
+            eventId: stringField("event_id", in: object) ?? stringField("eventId", in: object)
+        )
+    }
+
+    private func updateCurrentManusTitle(from value: JSONValue) {
+        guard let title = stringField("title", in: value), var thread = currentManusThread else { return }
+        thread.title = title
+        currentManusThread = thread
+        if let index = manusThreads.firstIndex(where: { $0.id == thread.id }) {
+            manusThreads[index] = thread
+        }
+    }
+
+    private func stringField(_ key: String, in value: JSONValue) -> String? {
+        guard case .object(let object) = value else { return nil }
+        return stringField(key, in: object)
+    }
+
+    private func stringField(_ key: String, in object: [String: JSONValue]) -> String? {
+        guard case .string(let value)? = object[key] else { return nil }
+        return value
+    }
+
+    private func intField(_ key: String, in object: [String: JSONValue]) -> Int? {
+        switch object[key] {
+        case .number(let value):
+            return Int(value)
+        case .string(let value):
+            return Int(value)
+        default:
+            return nil
+        }
+    }
+
+    private func arrayField(_ key: String, in object: [String: JSONValue]) -> [JSONValue]? {
+        guard case .array(let value)? = object[key] else { return nil }
+        return value
+    }
+
+    private func objectField(_ key: String, in object: [String: JSONValue]) -> [String: JSONValue]? {
+        guard case .object(let value)? = object[key] else { return nil }
+        return value
+    }
+
     private func ensureOrchestrator() async {
         do {
             try await launcher.ensureRunning(client: client)
@@ -325,5 +820,12 @@ final class AppStateStore: ObservableObject {
                 }
             }
         }
+    }
+
+    private func resetManusPhaseTwoState() {
+        manusSandboxAccess = nil
+        manusFilesResponse = .empty
+        manusFilePreview = nil
+        manusFileDownloadLink = nil
     }
 }

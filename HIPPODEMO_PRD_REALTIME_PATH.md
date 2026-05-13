@@ -457,6 +457,7 @@ POST /active-task/{task_id}/confirm
 - `/integrations/cua/start|stop|restart` 管理本地 `CuaDriver.app` daemon；有 app bundle 时优先通过 LaunchServices 启动，让 macOS TCC 权限归属到 `com.trycua.driver`。
 - `/intervention/detect` 把 Active Task 和 target preflight 合并为 `intervention_signal_detected` / `intervention_signal_waiting`。
 - `confirm` 不再是纯 mock；会解析 Active Task 的 `insert_draft` action，取对应 artifact 内容，先通过 target preflight，再调用 `cua-driver type_text`。
+- `confirm` 优先使用 Active Task action 中已经锁定的 safe target surface；这避免用户点击确认或控制台请求时当前 active app 瞬间切走，导致插入目标被错误重算。没有有效 safe surface hint 时才重新检测当前 active app。
 - 事件历史新增 `intervention_signal_detected`、`intervention_signal_waiting`、`cua_driver_command`、`cua_insert_requested`、`cua_insert_completed`、`cua_insert_failed`。
 - 插入事件 payload 只记录 task/action、目标 app/pid、字符数和结果 detail，不记录正文内容。
 - 默认不直接用 uvicorn 进程发键盘事件；Orchestrator 启动 daemon 时优先走 `CuaDriver.app`，让 macOS TCC 权限归属到 driver。

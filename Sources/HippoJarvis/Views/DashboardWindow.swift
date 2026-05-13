@@ -49,8 +49,7 @@ struct DashboardWindow: View {
     var body: some View {
         NavigationSplitView(columnVisibility: columnVisibilityBinding) {
             DashboardSidebar(
-                route: route,
-                onSelect: { self.route = $0 }
+                route: routeBinding
             )
             .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 260)
         } detail: {
@@ -58,9 +57,16 @@ struct DashboardWindow: View {
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 1024, idealWidth: 1280, minHeight: 640, idealHeight: 800)
-        .background(.regularMaterial)
         .task {
             await store.bootstrap()
+        }
+    }
+
+    private var routeBinding: Binding<DashboardRouteID> {
+        Binding {
+            route
+        } set: { next in
+            route = next
         }
     }
 
@@ -94,20 +100,45 @@ struct DashboardWindow: View {
 
 private struct DashboardSidebar: View {
     @EnvironmentObject private var store: AppStateStore
-    let route: DashboardRouteID
-    let onSelect: (DashboardRouteID) -> Void
+    @Binding var route: DashboardRouteID
 
     var body: some View {
-        VStack(spacing: 0) {
+        List(selection: routeSelection) {
             identityRow
-            activityRows
-            libraryRows
-            Spacer(minLength: 0)
+                .listRowInsets(.init(top: 8, leading: 8, bottom: 14, trailing: 8))
+                .listRowSeparator(.hidden)
+
+            Section {
+                sidebarItem(.chat, trailing: "BETA")
+                    .tag(DashboardRouteID.chat)
+                sidebarItem(.liveSignal, badge: "\(liveEventCount)")
+                    .tag(DashboardRouteID.liveSignal)
+                sidebarItem(.activeTask, badge: store.snapshot.currentTask == nil ? nil : "1", badgeAccent: true)
+                    .tag(DashboardRouteID.activeTask)
+                sidebarItem(.sessions)
+                    .tag(DashboardRouteID.sessions)
+            }
+
+            Section("Library") {
+                ForEach(store.snapshot.skills.prefix(6)) { skill in
+                    skillRow(skill)
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) {
             footer
         }
-        .padding(.horizontal, 8)
-        .padding(.bottom, 8)
-        .background(.thinMaterial)
+    }
+
+    private var routeSelection: Binding<DashboardRouteID?> {
+        Binding {
+            route
+        } set: { next in
+            if let next {
+                route = next
+            }
+        }
     }
 
     private var identityRow: some View {
@@ -126,45 +157,6 @@ private struct DashboardSidebar: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 8)
-        .padding(.top, 8)
-        .padding(.bottom, 14)
-    }
-
-    private var activityRows: some View {
-        VStack(spacing: 0) {
-            sidebarItem(.chat, trailing: "Beta")
-            sidebarItem(.liveSignal, badge: "\(liveEventCount)")
-            sidebarItem(.activeTask, badge: store.snapshot.currentTask == nil ? nil : "1", badgeAccent: true)
-            sidebarItem(.sessions)
-        }
-    }
-
-    private var libraryRows: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Text("Library")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    Task { await store.generateSkill() }
-                } label: {
-                    Image(systemName: "plus")
-                        .font(.system(size: 11, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel("Generate skill")
-            }
-            .padding(.horizontal, 12)
-            .padding(.top, 10)
-            .padding(.bottom, 4)
-
-            ForEach(store.snapshot.skills.prefix(6)) { skill in
-                skillRow(skill)
-            }
-        }
     }
 
     private var footer: some View {
@@ -173,7 +165,7 @@ private struct DashboardSidebar: View {
                 .padding(.horizontal, -8)
             HStack(spacing: 8) {
                 HippoSymbolButton(systemName: "gearshape", title: "Settings", active: route == .settings) {
-                    onSelect(.settings)
+                    route = .settings
                 }
                 VStack(alignment: .leading, spacing: 1) {
                     Text("Orchestrator")
@@ -190,68 +182,82 @@ private struct DashboardSidebar: View {
             }
             .padding(.horizontal, 8)
         }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 8)
     }
 
     private func sidebarItem(_ item: DashboardRouteID, trailing: String? = nil, badge: String? = nil, badgeAccent: Bool = false) -> some View {
-        Button {
-            onSelect(item)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: item.icon)
-                    .font(.system(size: 13, weight: .regular))
-                    .frame(width: 20)
-                    .foregroundStyle(route == item ? Color.accentColor : .secondary)
-                Text(item.title)
-                    .font(.system(size: 13, weight: route == item ? .semibold : .medium))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                if let trailing {
-                    Text(trailing)
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(Color.accentColor)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 1)
-                        .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
-                }
-                if let badge {
-                    Text(badge)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(badgeAccent ? .white : .secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 1)
-                        .background(badgeAccent ? Color.accentColor : HippoTheme.subtleFill, in: Capsule())
-                }
+        HStack(spacing: 8) {
+            Image(systemName: item.icon)
+                .font(.system(size: 13, weight: .regular))
+                .frame(width: 20)
+            Text(item.title)
+                .font(.system(size: 13, weight: route == item ? .semibold : .medium))
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            if let trailing {
+                Text(trailing)
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(Color.accentColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 1)
+                    .background(Color.accentColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 4, style: .continuous))
             }
-            .frame(height: 28)
-            .padding(.horizontal, 8)
-            .background(route == item ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            if let badge {
+                Text(badge)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(badgeAccent ? .white : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 1)
+                    .background(badgeAccent ? Color.accentColor : HippoTheme.subtleFill, in: Capsule())
+            }
         }
-        .buttonStyle(.plain)
+        .frame(height: 28)
+        .contentShape(Rectangle())
         .accessibilityLabel(item.title)
     }
 
     private func skillRow(_ skill: SkillRecord) -> some View {
-        Button {
-            onSelect(.skills)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .regular))
-                    .foregroundStyle(route == .skills ? Color.accentColor : .secondary)
-                    .frame(width: 18)
-                Text(skill.name)
-                    .font(.system(size: 13, weight: route == .skills ? .semibold : .medium))
-                    .lineLimit(1)
-                Spacer(minLength: 0)
-                Text(compactDate(skill.createdAt))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+        HStack(spacing: 6) {
+            Button {
+                route = .skills
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 13, weight: .regular))
+                        .foregroundStyle(route == .skills ? Color.accentColor : .secondary)
+                        .frame(width: 18)
+                    Text(skill.name)
+                        .font(.system(size: 13, weight: route == .skills ? .semibold : .medium))
+                        .lineLimit(1)
+                    Spacer(minLength: 0)
+                    Text(compactDate(skill.createdAt))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                .contentShape(Rectangle())
             }
-            .frame(height: 32)
-            .padding(.horizontal, 8)
-            .background(route == .skills ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .buttonStyle(.plain)
+            .accessibilityLabel(skill.name)
+
+            Button(role: .destructive) {
+                Task { await store.deleteSkill(id: skill.id) }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 22, height: 22)
+                    .background(HippoTheme.subtleFill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
+            }
+            .buttonStyle(.borderless)
+            .help("Delete skill")
         }
-        .buttonStyle(.plain)
+        .frame(height: 32)
+        .contextMenu {
+            Button("Delete", role: .destructive) {
+                Task { await store.deleteSkill(id: skill.id) }
+            }
+        }
     }
 
     private var isRecording: Bool {
@@ -285,7 +291,8 @@ private struct DashboardSidebar: View {
     }
 }
 
-private struct DashboardPageShell<Toolbar: View, Content: View>: View {
+struct DashboardPageShell<Toolbar: View, Content: View>: View {
+    @EnvironmentObject private var store: AppStateStore
     let title: String
     var subtitle: String?
     let toolbar: Toolbar
@@ -305,7 +312,6 @@ private struct DashboardPageShell<Toolbar: View, Content: View>: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            titlebar
             HStack(spacing: 8) {
                 toolbar
             }
@@ -314,41 +320,112 @@ private struct DashboardPageShell<Toolbar: View, Content: View>: View {
             .overlay(alignment: .bottom) {
                 HippoHairline()
             }
-            content
-        }
-        .background(HippoTheme.panelFill.opacity(0.56))
-    }
-
-    private var titlebar: some View {
-        HStack(spacing: 10) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-            if let subtitle {
-                Text(subtitle)
-                    .font(.system(size: 12))
+            if let error = store.lastError, !error.isEmpty {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.orange)
+                    Text(error)
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer()
+                    Button {
+                        store.lastError = nil
+                    } label: {
+                        Image(systemName: "xmark")
+                            .font(.system(size: 11, weight: .semibold))
+                            .frame(width: 22, height: 22)
+                    }
+                    .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 14)
+                .frame(minHeight: 34)
+                .background(.orange.opacity(0.08))
+                .overlay(alignment: .bottom) {
+                    HippoHairline()
+                }
             }
-            Spacer(minLength: 0)
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: 32)
-        .padding(.horizontal, 14)
+        .navigationTitle(title)
+        .modifier(DashboardNavigationSubtitle(subtitle: subtitle))
     }
 }
 
-private struct DashboardSegmented: View {
+private struct DashboardNavigationSubtitle: ViewModifier {
+    var subtitle: String?
+
+    func body(content: Content) -> some View {
+        if let subtitle {
+            content.navigationSubtitle(subtitle)
+        } else {
+            content
+        }
+    }
+}
+
+struct DashboardSegmented: View {
     let items: [String]
     @Binding var selection: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        Picker("", selection: $selection) {
+        HStack(spacing: 0) {
             ForEach(items, id: \.self) { item in
-                Text(item).tag(item)
+                segmentedButton(item)
             }
         }
-        .pickerStyle(.segmented)
-        .controlSize(.small)
-        .frame(minWidth: CGFloat(items.count * 80))
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(HippoTheme.segmentedBackground)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .strokeBorder(HippoTheme.hairline, lineWidth: 0.5)
+                }
+        )
         .accessibilityLabel("Filter")
+    }
+
+    private func segmentedButton(_ item: String) -> some View {
+        let selected = item == selection
+        return Button {
+            select(item)
+        } label: {
+            Text(item)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .padding(.horizontal, 10)
+                .frame(minWidth: 36)
+                .frame(height: 24)
+                .background(cellBackground(selected: selected))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(selected ? .primary : .secondary)
+        .accessibilityLabel(item)
+        .accessibilityValue(selected ? "Selected" : "")
+    }
+
+    private func select(_ item: String) {
+        if reduceMotion {
+            selection = item
+        } else {
+            withAnimation(.easeInOut(duration: 0.15)) {
+                selection = item
+            }
+        }
+    }
+
+    private func cellBackground(selected: Bool) -> some View {
+        RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(selected ? selectedFill : Color.clear)
+            .shadow(color: selected ? .black.opacity(0.06) : .clear, radius: 0.5, y: 1)
+    }
+
+    private var selectedFill: Color {
+        Color(nsColor: .controlBackgroundColor).opacity(0.95)
     }
 }
 
@@ -375,251 +452,11 @@ private struct DashboardSearchField: View {
     }
 }
 
-private struct DashboardChatView: View {
-    @EnvironmentObject private var store: AppStateStore
-    @State private var tab = "Chat"
-    @State private var draft = ""
-
-    var body: some View {
-        DashboardPageShell(
-            title: "Chat",
-            subtitle: "Hippo · local agent"
-        ) {
-            DashboardSegmented(items: ["Chat", "Recent", "Templates"], selection: $tab)
-            Spacer()
-            modelPicker
-            HippoSymbolButton(systemName: "square.and.pencil", title: "New chat") {}
-        } content: {
-            VStack {
-                Spacer(minLength: 16)
-                VStack(spacing: 0) {
-                    sessionPill
-                    Text("What should Hippo do?")
-                        .font(.custom("New York", size: 42).weight(.regular))
-                        .multilineTextAlignment(.center)
-                        .padding(.bottom, 24)
-                    composer
-                    connectTools
-                    suggestionChips
-                    recentThreads
-                }
-                .frame(maxWidth: 720)
-                .padding(.horizontal, 28)
-                Spacer(minLength: 16)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-    }
-
-    private var modelPicker: some View {
-        Button {} label: {
-            Label("Hippo Mini · local", systemImage: "cpu")
-                .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 12)
-                .frame(height: 28)
-                .background(HippoTheme.subtleFill, in: Capsule())
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.primary)
-    }
-
-    private var sessionPill: some View {
-        HStack(spacing: 8) {
-            HippoStatusDot(color: .red, pulse: store.snapshot.currentSession != nil, size: 6)
-            Text("Active session · \(store.snapshot.currentSession?.title ?? "none")")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Button("Attach") {}
-                .buttonStyle(HippoPushButtonStyle(.plain, size: .sm))
-                .foregroundStyle(Color.accentColor)
-        }
-        .padding(.leading, 12)
-        .padding(.trailing, 4)
-        .padding(.vertical, 5)
-        .background(HippoTheme.subtleFill, in: Capsule())
-        .padding(.bottom, 22)
-    }
-
-    private var composer: some View {
-        VStack(spacing: 12) {
-            TextEditor(text: $draft)
-                .font(.system(size: 15))
-                .scrollContentBackground(.hidden)
-                .frame(minHeight: 56, maxHeight: 80)
-                .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text("Assign a task, ask Hippo to draft something, or describe what to capture next...")
-                            .font(.system(size: 15))
-                            .foregroundStyle(.secondary)
-                            .padding(.top, 8)
-                            .padding(.leading, 5)
-                            .allowsHitTesting(false)
-                    }
-                }
-
-            HStack(spacing: 6) {
-                roundControl("plus.circle")
-                toolChipGroup
-                roundControl("display")
-                Spacer()
-                roundControl("livephoto")
-                roundControl("mic.fill")
-                Button {} label: {
-                    Image(systemName: "arrow.up.circle.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 30, height: 30)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(draft.isEmpty ? .secondary : Color.accentColor)
-            }
-        }
-        .padding(16)
-        .background(Color(nsColor: .textBackgroundColor).opacity(0.88), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(HippoTheme.hairline, lineWidth: 0.5)
-        }
-        .shadow(color: .black.opacity(0.06), radius: 12, y: 5)
-        .padding(.bottom, 12)
-    }
-
-    private var toolChipGroup: some View {
-        HStack(spacing: 4) {
-            toolDot("envelope.fill", color: .red)
-            toolDot("calendar", color: .blue)
-            toolDot("chevron.left.forwardslash.chevron.right", color: .black)
-            Text("+2")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .padding(.leading, 4)
-        }
-        .padding(.leading, 4)
-        .padding(.trailing, 10)
-        .frame(height: 30)
-        .background(HippoTheme.subtleFill, in: Capsule())
-    }
-
-    private var connectTools: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "wrench.and.screwdriver.fill")
-                .foregroundStyle(.secondary)
-            Text("Connect more tools to Hippo")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Spacer()
-            ForEach(["envelope.fill", "calendar", "bubble.left.and.bubble.right.fill", "chevron.left.forwardslash.chevron.right", "square.and.pencil"], id: \.self) { icon in
-                Image(systemName: icon)
-                    .font(.system(size: 9, weight: .bold))
-                    .foregroundStyle(.white)
-                    .frame(width: 18, height: 18)
-                    .background(Color.accentColor, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
-            }
-            Image(systemName: "xmark")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 14)
-        .frame(height: 36)
-        .background(HippoTheme.subtleFill, in: Capsule())
-        .overlay {
-            Capsule().strokeBorder(HippoTheme.hairline, lineWidth: 0.5)
-        }
-        .padding(.bottom, 20)
-    }
-
-    private var suggestionChips: some View {
-        HippoFlowLayout(spacing: 8) {
-            ForEach(["Generate a skill", "Draft follow-up", "Summarize last session", "Start capture", "More"], id: \.self) { title in
-                Button(title) {}
-                    .buttonStyle(HippoPushButtonStyle(.neutral, size: .lg))
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.bottom, 28)
-    }
-
-    private var recentThreads: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack {
-                Text("Recent threads")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.secondary)
-                    .textCase(.uppercase)
-                Spacer()
-                Button("See all") {}
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.accentColor)
-            }
-            .padding(.horizontal, 8)
-
-            HippoInsetPanel(radius: 12) {
-                VStack(spacing: 0) {
-                    threadRow("Draft a reply to Hana from the Ridgeline thread", sub: "3 turns · uses Mail · 2 min ago", icon: "envelope.fill", color: .red)
-                    HippoHairline()
-                    threadRow("Generate a skill that posts standup notes to Linear", sub: "7 turns · references latest session · yesterday", icon: "sparkles", color: .orange)
-                    HippoHairline()
-                    threadRow("Summarize the design review session", sub: "2 turns · references live signal · Mon", icon: "clock.arrow.circlepath", color: .blue)
-                }
-            }
-        }
-    }
-
-    private func roundControl(_ systemName: String) -> some View {
-        Button {} label: {
-            Image(systemName: systemName)
-                .font(.system(size: 13, weight: .medium))
-                .frame(width: 30, height: 30)
-                .background(.clear, in: Circle())
-                .overlay {
-                    Circle().strokeBorder(HippoTheme.hairline, lineWidth: 0.5)
-                }
-        }
-        .buttonStyle(.plain)
-        .foregroundStyle(.secondary)
-    }
-
-    private func toolDot(_ systemName: String, color: Color) -> some View {
-        Image(systemName: systemName)
-            .font(.system(size: 10, weight: .bold))
-            .foregroundStyle(.white)
-            .frame(width: 22, height: 22)
-            .background(color, in: Circle())
-            .overlay {
-                Circle().strokeBorder(.white.opacity(0.85), lineWidth: 1.5)
-            }
-    }
-
-    private func threadRow(_ title: String, sub: String, icon: String, color: Color) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon)
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(color)
-                .frame(width: 28, height: 28)
-                .background(color.opacity(0.14), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 13, weight: .medium))
-                    .lineLimit(1)
-                Text(sub)
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-            Spacer()
-            Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .bold))
-                .foregroundStyle(.tertiary)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-    }
-}
-
 private struct DashboardLiveSignalView: View {
     @EnvironmentObject private var store: AppStateStore
     @State private var filter = "All"
     @State private var search = ""
+    @State private var collapsedGroups: Set<String> = ["eng-standup", "design-review"]
 
     var body: some View {
         DashboardPageShell(
@@ -641,9 +478,9 @@ private struct DashboardLiveSignalView: View {
         } content: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    eventGroup(title: store.snapshot.currentSession?.title ?? "Current signal", status: store.snapshot.currentSession == nil ? nil : "Active", duration: currentDuration, rows: filteredEvents)
-                    eventGroup(title: "Eng standup", status: nil, duration: "yesterday · archived", rows: [], collapsed: true)
-                    eventGroup(title: "Design review", status: nil, duration: "Mon · archived", rows: [], collapsed: true)
+                    eventGroup(id: "current", title: store.snapshot.currentSession?.title ?? "Current signal", status: store.snapshot.currentSession == nil ? nil : "Active", duration: currentDuration, rows: filteredEvents)
+                    eventGroup(id: "eng-standup", title: "Eng standup", status: nil, duration: "yesterday · archived", rows: [])
+                    eventGroup(id: "design-review", title: "Design review", status: nil, duration: "Mon · archived", rows: [])
                 }
                 .padding(24)
             }
@@ -688,12 +525,21 @@ private struct DashboardLiveSignalView: View {
         )
     }
 
-    private func eventGroup(title: String, status: String?, duration: String, rows: [EventRecord], collapsed: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
+    private func eventGroup(id: String, title: String, status: String?, duration: String, rows: [EventRecord]) -> some View {
+        DisclosureGroup(isExpanded: eventGroupExpansion(id)) {
+            HippoInsetPanel {
+                VStack(spacing: 0) {
+                    ForEach(rows) { event in
+                        eventRow(event)
+                        if event.id != rows.last?.id {
+                            HippoHairline()
+                        }
+                    }
+                }
+            }
+            .padding(.top, 8)
+        } label: {
             HStack(spacing: 8) {
-                Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                    .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(.secondary)
                 Text(title)
                     .font(.system(size: 13, weight: .semibold))
                 if let status {
@@ -704,20 +550,21 @@ private struct DashboardLiveSignalView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
             }
-            .padding(.horizontal, 4)
-            .padding(.vertical, 8)
+            .contentShape(Rectangle())
+        }
+        .disclosureGroupStyle(.automatic)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 8)
+    }
 
-            if !collapsed {
-                HippoInsetPanel {
-                    VStack(spacing: 0) {
-                        ForEach(rows) { event in
-                            eventRow(event)
-                            if event.id != rows.last?.id {
-                                HippoHairline()
-                            }
-                        }
-                    }
-                }
+    private func eventGroupExpansion(_ id: String) -> Binding<Bool> {
+        Binding {
+            !collapsedGroups.contains(id)
+        } set: { expanded in
+            if expanded {
+                collapsedGroups.remove(id)
+            } else {
+                collapsedGroups.insert(id)
             }
         }
     }
@@ -793,16 +640,18 @@ private struct DashboardActiveTaskView: View {
         ) {
             DashboardSegmented(items: ["Awaiting", "Completed", "Ignored"], selection: $tab)
             Spacer()
-            Button("Ignore") { Task { await store.ignoreCurrentTask() } }
+            Button("Ignore") {
+                ignoreCurrentTask()
+            }
                 .buttonStyle(HippoPushButtonStyle(.neutral))
-                .disabled(store.snapshot.currentTask == nil || store.isBusy)
+                .disabled(store.isBusy)
             Button {
-                Task { await store.confirmCurrentTask() }
+                insertCurrentTaskDraft()
             } label: {
                 Label("Insert draft", systemImage: "arrow.right.to.line")
             }
             .buttonStyle(HippoPushButtonStyle(.preferred))
-            .disabled(store.snapshot.currentTask == nil || store.isBusy)
+            .disabled(store.isBusy)
         } content: {
             ScrollView {
                 if let task = store.snapshot.currentTask {
@@ -930,6 +779,22 @@ private struct DashboardActiveTaskView: View {
         Rectangle().fill(HippoTheme.hairline).frame(width: 0.5, height: 38).padding(.horizontal, 16)
     }
 
+    private func ignoreCurrentTask() {
+        guard store.snapshot.currentTask != nil else {
+            store.lastError = "No task awaiting review."
+            return
+        }
+        Task { await store.ignoreCurrentTask() }
+    }
+
+    private func insertCurrentTaskDraft() {
+        guard store.snapshot.currentTask != nil else {
+            store.lastError = "No task awaiting review."
+            return
+        }
+        Task { await store.confirmCurrentTask() }
+    }
+
     private func recentTaskRow(_ title: String, sub: String, state: String, color: Color) -> some View {
         HStack(spacing: 14) {
             Image(systemName: "target")
@@ -953,6 +818,11 @@ private struct DashboardSessionsView: View {
     @EnvironmentObject private var store: AppStateStore
     @State private var tab = "All"
     @State private var search = ""
+    private let startedColumnWidth: CGFloat = 150
+    private let durationColumnWidth: CGFloat = 84
+    private let artifactsColumnWidth: CGFloat = 86
+    private let stateColumnWidth: CGFloat = 132
+    private let chevronColumnWidth: CGFloat = 28
 
     var body: some View {
         DashboardPageShell(
@@ -985,17 +855,20 @@ private struct DashboardSessionsView: View {
     }
 
     private var tableHeader: some View {
-        Grid(horizontalSpacing: 14) {
-            GridRow {
-                headerCell("Session", alignment: .leading)
-                headerCell("Started")
-                headerCell("Duration", alignment: .trailing)
-                headerCell("Artifacts", alignment: .trailing)
-                headerCell("State")
-                Color.clear.frame(width: 28)
-            }
+        HStack(spacing: 14) {
+            headerCell("Session")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            headerCell("Started")
+                .frame(width: startedColumnWidth, alignment: .leading)
+            headerCell("Duration")
+                .frame(width: durationColumnWidth, alignment: .trailing)
+            headerCell("Artifacts")
+                .frame(width: artifactsColumnWidth, alignment: .trailing)
+            headerCell("State")
+                .frame(width: stateColumnWidth, alignment: .leading)
+            Color.clear.frame(width: chevronColumnWidth)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 16)
         .padding(.bottom, 8)
     }
 
@@ -1016,37 +889,46 @@ private struct DashboardSessionsView: View {
     }
 
     private func sessionRow(_ item: SessionListItem) -> some View {
-        Grid(horizontalSpacing: 14) {
-            GridRow {
-                HStack(spacing: 10) {
-                    Image(systemName: "record.circle")
-                        .foregroundStyle(item.state == "Active Task" ? Color.accentColor : .secondary)
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(item.title)
-                            .font(.system(size: 13, weight: .semibold))
-                            .lineLimit(1)
-                        Text(item.id)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                    }
+        HStack(spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "record.circle")
+                    .foregroundStyle(item.state == "Active Task" ? Color.accentColor : .secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.title)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text(item.id)
+                        .font(.system(size: 11, design: .monospaced))
+                        .foregroundStyle(.secondary)
                 }
-                Text(item.started).font(.system(size: 12)).foregroundStyle(.secondary)
-                Text(item.duration).font(.system(size: 12, design: .monospaced)).gridColumnAlignment(.trailing)
-                Text("\(item.artifacts)").font(.system(size: 12, design: .monospaced)).gridColumnAlignment(.trailing)
-                HippoCapsuleLabel(title: item.state, color: item.state == "Active Task" ? .blue : .green)
-                Image(systemName: "chevron.right").foregroundStyle(.tertiary).frame(width: 28)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            Text(item.started)
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .frame(width: startedColumnWidth, alignment: .leading)
+            Text(item.duration)
+                .font(.system(size: 12, design: .monospaced))
+                .frame(width: durationColumnWidth, alignment: .trailing)
+            Text("\(item.artifacts)")
+                .font(.system(size: 12, design: .monospaced))
+                .frame(width: artifactsColumnWidth, alignment: .trailing)
+            HippoCapsuleLabel(title: item.state, color: item.state == "Active Task" ? .blue : .green)
+                .frame(width: stateColumnWidth, alignment: .leading)
+            Image(systemName: "chevron.right")
+                .foregroundStyle(.tertiary)
+                .frame(width: chevronColumnWidth)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
         .background(item.state == "Active Task" ? HippoTheme.subtleFill : .clear)
     }
 
-    private func headerCell(_ title: String, alignment: Alignment = .leading) -> some View {
+    private func headerCell(_ title: String) -> some View {
         Text(title.uppercased())
             .font(.system(size: 10, weight: .bold))
             .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, alignment: alignment)
     }
 }
 
@@ -1168,17 +1050,11 @@ private struct DashboardSkillView: View {
                     .padding(16)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(HippoTheme.subtleFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-            } else if let attributed = try? AttributedString(markdown: skill.content) {
-                Text(attributed)
-                    .font(.system(size: 14))
-                    .lineSpacing(4)
-                    .textSelection(.enabled)
-                mockCallout
             } else {
-                Text(skill.content)
-                    .font(.system(size: 14))
-                    .textSelection(.enabled)
-                mockCallout
+                DashboardSkillMarkdownView(markdown: skill.content)
+                if !skill.content.localizedCaseInsensitiveContains("[!callout]") {
+                    mockCallout
+                }
             }
         }
     }
@@ -1191,10 +1067,10 @@ private struct DashboardSkillView: View {
                 .font(.system(size: 14))
         }
         .padding(14)
-        .background(.blue.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
         .overlay {
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.blue.opacity(0.30), lineWidth: 0.5)
+                .strokeBorder(.orange.opacity(0.30), lineWidth: 0.5)
         }
     }
 
@@ -1211,6 +1087,197 @@ private struct DashboardSkillView: View {
     private func compactDate(_ value: String) -> String {
         guard let date = ISO8601DateFormatter().date(from: value) else { return value }
         return date.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+    }
+}
+
+private struct DashboardSkillMarkdownView: View {
+    let markdown: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            ForEach(blocks) { block in
+                blockView(block)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .textSelection(.enabled)
+    }
+
+    private var blocks: [DashboardSkillMarkdownBlock] {
+        DashboardSkillMarkdownParser(markdown: markdown).blocks
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: DashboardSkillMarkdownBlock) -> some View {
+        switch block.kind {
+        case .heading:
+            Text(block.text.uppercased())
+                .font(.system(size: 11, weight: .bold))
+                .tracking(0.66)
+                .foregroundStyle(.secondary)
+                .padding(.top, 8)
+        case .paragraph:
+            Text(block.text)
+                .font(.system(size: 14))
+                .lineSpacing(4)
+                .foregroundStyle(.primary)
+        case .bullet:
+            HStack(alignment: .top, spacing: 8) {
+                Text("•")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                Text(block.text)
+                    .font(.system(size: 14))
+                    .lineSpacing(4)
+            }
+        case .code:
+            ScrollView(.horizontal) {
+                Text(block.text)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
+            }
+            .background(HippoTheme.subtleFill, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(HippoTheme.hairline, lineWidth: 0.5)
+            }
+        case .callout:
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "shield.checkered")
+                    .foregroundStyle(.orange)
+                Text(block.text)
+                    .font(.system(size: 14))
+                    .lineSpacing(4)
+            }
+            .padding(14)
+            .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(.orange.opacity(0.30), lineWidth: 0.5)
+            }
+        }
+    }
+}
+
+private struct DashboardSkillMarkdownBlock: Identifiable {
+    enum Kind {
+        case heading
+        case paragraph
+        case bullet
+        case code
+        case callout
+    }
+
+    let id = UUID()
+    let kind: Kind
+    let text: String
+}
+
+private struct DashboardSkillMarkdownParser {
+    let markdown: String
+
+    var blocks: [DashboardSkillMarkdownBlock] {
+        var result: [DashboardSkillMarkdownBlock] = []
+        var paragraph: [String] = []
+        var code: [String] = []
+        var callout: [String] = []
+        var inCode = false
+        var inCallout = false
+
+        func flushParagraph(_ target: inout [DashboardSkillMarkdownBlock], _ lines: inout [String]) {
+            let text = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                target.append(DashboardSkillMarkdownBlock(kind: .paragraph, text: text))
+            }
+            lines.removeAll()
+        }
+
+        func flushCode(_ target: inout [DashboardSkillMarkdownBlock], _ lines: inout [String]) {
+            let text = lines.joined(separator: "\n").trimmingCharacters(in: .newlines)
+            if !text.isEmpty {
+                target.append(DashboardSkillMarkdownBlock(kind: .code, text: text))
+            }
+            lines.removeAll()
+        }
+
+        func flushCallout(_ target: inout [DashboardSkillMarkdownBlock], _ lines: inout [String]) {
+            let text = lines.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !text.isEmpty {
+                target.append(DashboardSkillMarkdownBlock(kind: .callout, text: text))
+            }
+            lines.removeAll()
+        }
+
+        for rawLine in markdown.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+
+            if line.hasPrefix("```") {
+                if inCode {
+                    flushCode(&result, &code)
+                    inCode = false
+                } else {
+                    flushParagraph(&result, &paragraph)
+                    inCallout = false
+                    inCode = true
+                }
+                continue
+            }
+
+            if inCode {
+                code.append(rawLine)
+                continue
+            }
+
+            if line.isEmpty {
+                flushParagraph(&result, &paragraph)
+                if inCallout {
+                    flushCallout(&result, &callout)
+                    inCallout = false
+                }
+                continue
+            }
+
+            if line.hasPrefix(">") {
+                flushParagraph(&result, &paragraph)
+                var text = String(line.dropFirst()).trimmingCharacters(in: .whitespaces)
+                if text.localizedCaseInsensitiveContains("[!callout]") {
+                    text = text.replacingOccurrences(of: "[!callout]", with: "", options: .caseInsensitive)
+                        .trimmingCharacters(in: .whitespaces)
+                }
+                callout.append(text)
+                inCallout = true
+                continue
+            }
+
+            if inCallout {
+                flushCallout(&result, &callout)
+                inCallout = false
+            }
+
+            if line.hasPrefix("## ") {
+                flushParagraph(&result, &paragraph)
+                result.append(DashboardSkillMarkdownBlock(kind: .heading, text: String(line.dropFirst(3))))
+            } else if line.hasPrefix("# ") {
+                flushParagraph(&result, &paragraph)
+                result.append(DashboardSkillMarkdownBlock(kind: .heading, text: String(line.dropFirst(2))))
+            } else if line.hasPrefix("- ") || line.hasPrefix("* ") {
+                flushParagraph(&result, &paragraph)
+                result.append(DashboardSkillMarkdownBlock(kind: .bullet, text: String(line.dropFirst(2))))
+            } else {
+                paragraph.append(line)
+            }
+        }
+
+        if inCode {
+            flushCode(&result, &code)
+        }
+        if inCallout {
+            flushCallout(&result, &callout)
+        }
+        flushParagraph(&result, &paragraph)
+        return result
     }
 }
 
@@ -1273,6 +1340,7 @@ private struct DashboardSettingsView: View {
             formRow("Auto-launch on app start") {
                 Toggle("", isOn: .constant(true))
                     .toggleStyle(.switch)
+                    .controlSize(.mini)
                     .labelsHidden()
             }
         }
@@ -1344,7 +1412,9 @@ private struct DashboardSettingsView: View {
             }
             HippoHairline()
             formRow("Diagnostics", sub: "Export runtime log + state snapshot") {
-                Button("Export...") {}
+                Button("Export...") {
+                    store.lastError = "Diagnostics export is not wired in this demo build yet."
+                }
                     .buttonStyle(HippoPushButtonStyle(.neutral, size: .sm))
             }
         }

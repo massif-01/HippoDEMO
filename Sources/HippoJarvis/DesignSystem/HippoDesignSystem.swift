@@ -23,6 +23,11 @@ enum HippoTheme {
             ? NSColor(white: 1, alpha: 0.12)
             : NSColor(white: 0, alpha: 0.08)
     })
+    static let segmentedBackground = Color(nsColor: NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            ? NSColor(white: 1, alpha: 0.08)
+            : NSColor(white: 0, alpha: 0.05)
+    })
 
     static func stateColor(_ status: String) -> Color {
         switch status {
@@ -43,8 +48,17 @@ enum HippoTheme {
 struct HippoHairline: View {
     var body: some View {
         Rectangle()
-            .fill(HippoTheme.hairline)
+            .fill(Color(nsColor: .separatorColor).opacity(0.6))
             .frame(height: 0.5)
+    }
+}
+
+struct HippoVHairline: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color(nsColor: .separatorColor).opacity(0.6))
+            .frame(width: 0.5)
+            .padding(.vertical, 4)
     }
 }
 
@@ -231,6 +245,9 @@ struct HippoPushButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder(border, lineWidth: variant == .plain ? 0 : 0.5)
             }
+            .shadow(color: shadow, radius: 1.5, y: 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
     }
 
     private var foreground: Color {
@@ -267,6 +284,15 @@ struct HippoPushButtonStyle: ButtonStyle {
             .black.opacity(0.10)
         default:
             HippoTheme.hairline
+        }
+    }
+
+    private var shadow: Color {
+        switch variant {
+        case .preferred, .stop, .destructive, .neutral:
+            .black.opacity(0.06)
+        case .glass, .plain:
+            .clear
         }
     }
 }
@@ -308,6 +334,7 @@ struct HippoMetadataCell: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label.uppercased())
                 .font(.system(size: 10, weight: .semibold))
+                .tracking(0.4)
                 .foregroundStyle(.secondary)
             Text(value)
                 .font(.system(size: 14, weight: .semibold, design: mono ? .monospaced : .default))
@@ -315,6 +342,7 @@ struct HippoMetadataCell: View {
                 .lineLimit(1)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
     }
 }
 

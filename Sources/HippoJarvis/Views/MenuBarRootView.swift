@@ -9,7 +9,7 @@ struct MenuBarRootView: View {
         Group {
             if let task = store.snapshot.currentTask {
                 ReviewPopover(task: task)
-                    .frame(width: 340)
+                    .frame(width: 320)
                     .transition(.opacity)
             } else {
                 StatusPopover()
