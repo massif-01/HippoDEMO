@@ -12,6 +12,14 @@ pip install -r orchestrator/requirements.txt
 uvicorn orchestrator.main:app --reload --host 127.0.0.1 --port 8787
 ```
 
+For the app/runtime path used by `HippoJarvis.app`, build the bundled runtime instead:
+
+```bash
+bash script/bootstrap_basic_memory_runtime.sh
+bash script/bootstrap_vlmac_runtime.sh
+orchestrator-runtime/bin/python -m uvicorn orchestrator.main:app --host 127.0.0.1 --port 8787
+```
+
 ## Verify
 
 ```bash

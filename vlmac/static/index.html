@@ -627,7 +627,7 @@ label {
     </section>
 
     <section>
-      <h3>存储桶 <span id="storageBadge" style="float:right;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text2)">-</span></h3>
+      <h3>Basic Memory <span id="storageBadge" style="float:right;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text2)">-</span></h3>
       <div class="storage-stats">
         <span id="storageCount">0 文件</span>
         <span id="storageSize">0 KB</span>
@@ -1475,8 +1475,8 @@ function formatBytes(bytes) {
 async function refreshStorage() {
   try {
     const [listResp, statsResp] = await Promise.all([
-      fetch('/api/minio/list?limit=50'),
-      fetch('/api/minio/stats'),
+      fetch('/api/storage/list?kind=video_summary&limit=50'),
+      fetch('/api/storage/stats'),
     ]);
     const list = await listResp.json();
     const stats = await statsResp.json();
@@ -1511,7 +1511,7 @@ async function refreshStorage() {
 
 async function viewStorageFile(path) {
   try {
-    const resp = await fetch(`/api/minio/read?path=${encodeURIComponent(path)}`);
+    const resp = await fetch(`/api/storage/read?path=${encodeURIComponent(path)}`);
     const data = await resp.json();
     if (data.error) {
       alert(data.error);

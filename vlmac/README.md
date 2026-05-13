@@ -9,7 +9,7 @@
 - **变化监测（Diff Engine）** — 前端 16×9 网格像素对比，实时检测画面变化并标注事件
 - **手动对话查询** — 随时发问，VLM 流式回答，支持多轮对话历史
 - **定时任务** — 创建多个周期性自动分析任务，共享同一视频流
-- **MinIO 持久化** — 查询记录自动保存为 Markdown 文件
+- **Basic Memory 本地持久化** — 查询记录、滚动 context 和 evidence chunk 写入 Hippo Basic Memory project
 
 ## 架构
 
@@ -26,14 +26,14 @@
 ### 依赖
 
 - Python 3.10+
-- ffmpeg
+- `vlmac-runtime`（由 `script/bootstrap_vlmac_runtime.sh` 生成，内含 `imageio-ffmpeg` 的 ffmpeg）
 - [vLLM](https://github.com/vllm-project/vllm) 服务（默认 `localhost:58000`）
-- MinIO（默认 `localhost:9000`）
+- Hippo Basic Memory project path（由 `HIPPODEMO_BASIC_MEMORY_PROJECT_DIR` 提供）
 
 ### 安装
 
 ```bash
-pip install -r requirements.txt
+bash ../script/bootstrap_vlmac_runtime.sh
 ```
 
 ### 启动
@@ -50,10 +50,21 @@ python server.py
 |------|--------|------|
 | `VLLM_BASE_URL` | `http://localhost:58000` | vLLM 服务地址 |
 | `VLLM_MODEL` | `RM-01 VLM` | 模型名称 |
-| `MINIO_ENDPOINT` | `localhost:9000` | MinIO 地址 |
-| `MINIO_ACCESS_KEY` | `rm01` | MinIO 访问密钥 |
-| `MINIO_SECRET_KEY` | `rm01rm01` | MinIO 密钥 |
-| `MINIO_BUCKET` | `rm01` | MinIO 存储桶 |
+| `HIPPODEMO_VLMAC_STORAGE` | `basic-memory-local` | 存储后端 |
+| `HIPPODEMO_BASIC_MEMORY_PROJECT_DIR` | 必填 | Basic Memory `hippo` project 目录 |
+
+## 存储结构
+
+```text
+hippo/context/video/
+├── rolling_context.md
+├── rolling_context.jsonl
+├── chunks/{source_id}/{timestamp}.webm
+├── chunks/{source_id}/manifest.jsonl
+└── summaries/{source_id}/{timestamp}.md|json
+```
+
+每条滚动 context 使用服务端系统时间写入，并同时记录 `epoch_ms`。
 
 ## API 文档
 

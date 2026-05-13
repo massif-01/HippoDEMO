@@ -26,11 +26,8 @@
 |------|--------|------|
 | `VLLM_BASE_URL` | `http://localhost:58000` | vLLM 服务地址 |
 | `VLLM_MODEL` | `RM-01 VLM` | vLLM 模型名称 |
-| `MINIO_ENDPOINT` | `localhost:9000` | MinIO 服务地址 |
-| `MINIO_ACCESS_KEY` | `rm01` | MinIO 访问密钥 |
-| `MINIO_SECRET_KEY` | `rm01rm01` | MinIO 密钥 |
-| `MINIO_BUCKET` | `rm01` | MinIO 存储桶 |
-| `MINIO_PREFIX` | `context` | MinIO 对象前缀 |
+| `HIPPODEMO_VLMAC_STORAGE` | `basic-memory-local` | 存储后端 |
+| `HIPPODEMO_BASIC_MEMORY_PROJECT_DIR` | 必填 | Basic Memory `hippo` project 目录 |
 
 ---
 
@@ -168,19 +165,37 @@
 
 ---
 
-## 5. REST API — MinIO 存储
+## 5. REST API — Basic Memory 本地存储
+
+### `GET /api/storage/status`
+
+返回当前 storage backend、Basic Memory project path、rolling context 路径。
+
+### `GET /api/storage/list`
+
+列出本地 storage 文件（`?kind=video_summary|video_chunk|rolling_context&limit=50`）。
+
+### `GET /api/storage/read`
+
+读取 `hippo/context/...` 下的文本文件。二进制 chunk 目录不可通过该接口读取。
+
+### `GET /api/storage/stats`
+
+返回文本 storage 统计。
+
+### 兼容接口
 
 ### `GET /api/minio/list`
 
-列出 `context/` 下所有文件（`?limit=50`）。
+兼容旧前端，实际映射到本地 `/api/storage/list`。
 
 ### `GET /api/minio/read`
 
-读取文件（`?path=context/xxx.md`）。
+兼容旧前端，实际映射到本地 `/api/storage/read`。
 
 ### `GET /api/minio/stats`
 
-存储统计（文件数、总大小）。
+兼容旧前端，实际映射到本地 `/api/storage/stats`。
 
 ---
 
@@ -188,18 +203,20 @@
 
 | 文件模式 | 写入方式 | 说明 |
 |----------|----------|------|
-| `context/context.md` | 连接时**覆盖**，查询后**追加** | 当前活跃上下文 |
-| `context/session_{YYYYMMDD_HHMMSS}.md` | WS 手动查询后**追加** | 浏览器会话完整记录 |
-| `context/ws_task_{task_id}.md` | WS 定时任务查询后**追加** | WS 定时任务记录 |
-| `context/task_{task_id}.md` | Headless 任务查询后**追加** | Headless 任务记录 |
+| `hippo/context/video/rolling_context.md` | **追加** | 人类可读滚动视频上下文 |
+| `hippo/context/video/rolling_context.jsonl` | **追加** | 结构化滚动上下文，每行含 `system_time_iso` 和 `epoch_ms` |
+| `hippo/context/video/summaries/{source_id}/{timestamp}.md` | 新建 | 单次 VLM 分析 Markdown |
+| `hippo/context/video/summaries/{source_id}/{timestamp}.json` | 新建 | 单次 VLM 分析结构化数据 |
+| `hippo/context/video/chunks/{source_id}/{timestamp}.webm` | 新建 | 原始 evidence chunk，不进入 Basic Memory note |
+| `hippo/context/video/chunks/{source_id}/manifest.jsonl` | **追加** | chunk 索引 |
 
 ---
 
 ## 7. 快速开始
 
 ```bash
-# 安装依赖
-pip install -r requirements.txt
+# 准备本地 runtime（内含 vlmac Python 依赖和 ffmpeg）
+bash ../script/bootstrap_vlmac_runtime.sh
 
 # 启动服务
 python server.py
@@ -223,6 +240,6 @@ curl http://localhost:59092/api/tasks/abc12345/results
 # 停止任务
 curl -X DELETE http://localhost:59092/api/tasks/abc12345
 
-# 读取上下文
-curl "http://localhost:59092/api/minio/read?path=context/context.md"
+# 读取滚动上下文
+curl "http://localhost:59092/api/storage/read?path=hippo/context/video/rolling_context.md"
 ```

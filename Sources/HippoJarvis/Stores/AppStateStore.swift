@@ -15,6 +15,14 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var aiManusStatus: AiManusStatus = .empty
     @Published private(set) var aiManusRuntimeLastCommand: AiManusRuntimeCommandResponse?
     @Published private(set) var aiManusRuntimeLogs: AiManusRuntimeLogsResponse = .empty
+    @Published private(set) var basicMemoryConfig: BasicMemoryConfig = .empty
+    @Published private(set) var basicMemoryStatus: BasicMemoryStatus = .empty
+    @Published private(set) var basicMemorySearch: BasicMemorySearchResponse = .empty
+    @Published private(set) var basicMemoryRecent: BasicMemoryRecentResponse = .empty
+    @Published private(set) var basicMemoryNotePreview: BasicMemoryNote?
+    @Published private(set) var basicMemoryLastSync: BasicMemorySyncResponse?
+    @Published private(set) var vlmacPreflight: JSONValue?
+    @Published private(set) var contextFragments: [ContextFragment] = []
     @Published private(set) var manusThreads: [ManusThread] = []
     @Published private(set) var currentManusThread: ManusThread?
     @Published private(set) var manusMessages: [ManusMessage] = []
@@ -29,6 +37,7 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var isLoadingManusFilePreview = false
     @Published private(set) var isLoadingManusFileDownloadLink = false
     @Published private(set) var isRunningAiManusRuntimeCommand = false
+    @Published private(set) var isRunningBasicMemoryCommand = false
     @Published private(set) var isBusy = false
     @Published var language: AppLanguage {
         didSet {
@@ -139,6 +148,122 @@ final class AppStateStore: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    func refreshBasicMemory() async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryConfig = try await client.basicMemoryConfig()
+            basicMemoryStatus = try await client.basicMemoryStatus()
+            applyBasicMemoryService(basicMemoryStatus.service)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func setupBasicMemory() async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryStatus = try await client.setupBasicMemory()
+            basicMemoryConfig = try await client.basicMemoryConfig()
+            applyBasicMemoryService(basicMemoryStatus.service)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func searchBasicMemory(_ query: String) async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemorySearch = try await client.searchBasicMemory(query: trimmed, limit: 8)
+            if let first = basicMemorySearch.results.first {
+                await loadBasicMemoryNotePreview(first)
+            }
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadBasicMemoryRecent() async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryRecent = try await client.recentBasicMemoryNotes(limit: 8)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func refreshContextFragments() async {
+        await loadContextFragments(reportErrors: true)
+    }
+
+    func loadBasicMemoryNotePreview(_ result: BasicMemorySearchResult) async {
+        await loadBasicMemoryNotePreview(
+            BasicMemoryNotePreviewRequest(
+                identifier: result.identifier,
+                path: result.path,
+                permalink: result.permalink
+            )
+        )
+    }
+
+    func loadBasicMemoryNotePreview(_ note: BasicMemoryNote) async {
+        await loadBasicMemoryNotePreview(
+            BasicMemoryNotePreviewRequest(
+                identifier: note.identifier,
+                path: note.path,
+                permalink: note.permalink
+            )
+        )
+    }
+
+    func syncCurrentSessionToBasicMemory() async {
+        guard let session = snapshot.currentSession else {
+            lastError = "No current session is available to sync."
+            return
+        }
+        await syncBasicMemorySession(session.id)
+    }
+
+    func syncCurrentTaskToBasicMemory() async {
+        guard let task = snapshot.currentTask else {
+            lastError = "No current task is available to sync."
+            return
+        }
+        await syncBasicMemoryTask(task.id)
+    }
+
+    func syncLatestSkillToBasicMemory() async {
+        guard let skill = snapshot.skills.first else {
+            lastError = "No skill is available to sync."
+            return
+        }
+        await syncBasicMemorySkill(skill.id)
+    }
+
+    func syncLatestContextFragmentToBasicMemory() async {
+        guard let fragment = contextFragments.first else {
+            lastError = "No voice context fragment is available to sync."
+            return
+        }
+        await syncBasicMemoryContext(fragment.id)
     }
 
     func updateAiManusConfig(
@@ -451,6 +576,32 @@ final class AppStateStore: ObservableObject {
         await run { try await self.client.openChronicleTimelineTick() }
     }
 
+    func refreshVlmacPreflight() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let service = try await client.vlmacStatus()
+            applyVlmacService(service)
+            vlmacPreflight = try await client.vlmacPreflight()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func vlmacStart() async {
+        await run { try await self.client.vlmacStart() }
+    }
+
+    func vlmacStop() async {
+        await run { try await self.client.vlmacStop() }
+    }
+
+    func vlmacRestart() async {
+        await run { try await self.client.vlmacRestart() }
+    }
+
     func cuaDriverStart() async {
         await run { try await self.client.cuaDriverStart() }
     }
@@ -540,6 +691,7 @@ final class AppStateStore: ObservableObject {
             skillStore.persist(next.skills)
             await refreshCuaTargetSurface()
             await refreshEventHistory()
+            await loadContextFragments(reportErrors: false)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -558,6 +710,24 @@ final class AppStateStore: ObservableObject {
     private func refreshEventHistory() async {
         if let events = try? await client.eventHistory(limit: 80) {
             eventHistory = events
+        }
+    }
+
+    private func loadContextFragments(reportErrors: Bool) async {
+        do {
+            let response = try await client.recentContextFragments(
+                sessionID: snapshot.currentSession?.id,
+                modality: "voice",
+                limit: 8
+            )
+            contextFragments = response.resolvedFragments
+            if reportErrors {
+                lastError = nil
+            }
+        } catch {
+            if reportErrors {
+                lastError = error.localizedDescription
+            }
         }
     }
 
@@ -592,6 +762,72 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    private func loadBasicMemoryNotePreview(_ request: BasicMemoryNotePreviewRequest) async {
+        guard request.identifier?.isEmpty == false || request.path?.isEmpty == false || request.permalink?.isEmpty == false else {
+            return
+        }
+
+        do {
+            basicMemoryNotePreview = try await client.basicMemoryNotePreview(request)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemorySession(_ sessionID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemorySession(sessionID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemoryTask(_ taskID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemoryTask(taskID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemorySkill(_ skillID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemorySkill(skillID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemoryContext(_ fragmentID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemoryContext(fragmentID: fragmentID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            await loadContextFragments(reportErrors: false)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     private func applyAiManusRuntimeService(_ service: ServiceStatus?) {
         guard let service else { return }
         aiManusStatus = AiManusStatus(
@@ -600,6 +836,24 @@ final class AppStateStore: ObservableObject {
             detail: service.detail,
             config: aiManusConfig
         )
+    }
+
+    private func applyBasicMemoryService(_ service: ServiceStatus?) {
+        guard let service else { return }
+        if let index = snapshot.services.firstIndex(where: { $0.id == service.id || $0.name.lowercased() == service.name.lowercased() }) {
+            snapshot.services[index] = service
+        } else {
+            snapshot.services.append(service)
+        }
+    }
+
+    private func applyVlmacService(_ service: ServiceStatus?) {
+        guard let service else { return }
+        if let index = snapshot.services.firstIndex(where: { $0.id == service.id || $0.name.lowercased() == service.name.lowercased() }) {
+            snapshot.services[index] = service
+        } else {
+            snapshot.services.append(service)
+        }
     }
 
     private func loadManusThreadWithoutBusy(_ sessionID: String) async throws {

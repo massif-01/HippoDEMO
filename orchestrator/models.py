@@ -60,6 +60,20 @@ class Artifact(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ContextFragment(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("context"))
+    session_id: str
+    modality: str
+    source: str
+    text: str
+    started_at: str
+    ended_at: Optional[str] = None
+    sequence: int = 0
+    confidence: Optional[float] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    synced_at: Optional[str] = None
+
+
 class ProposedAction(BaseModel):
     id: str = Field(default_factory=lambda: new_id("action"))
     label: str
@@ -207,6 +221,7 @@ class AiManusChatRequest(BaseModel):
     message: Optional[str] = None
     attachments: Optional[List[Dict[str, Any]]] = None
     event_id: Optional[str] = None
+    route: Optional[str] = None
 
 
 class AiManusSignedUrlRequest(BaseModel):
