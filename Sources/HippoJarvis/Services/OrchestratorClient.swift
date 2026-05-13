@@ -153,8 +153,21 @@ struct OrchestratorClient {
         try await get(path: "integrations/vlmac/status")
     }
 
-    func vlmacPreflight() async throws -> JSONValue {
-        try await get(path: "integrations/vlmac/preflight")
+    func vlmacConfig() async throws -> VlmacConfig {
+        try await get(path: "integrations/vlmac/config")
+    }
+
+    func updateVlmacConfig(_ request: VlmacConfigRequest) async throws -> VlmacConfig {
+        try await post(path: "integrations/vlmac/config", body: request)
+    }
+
+    func vlmacPreflight(network: Bool = false) async throws -> JSONValue {
+        var components = URLComponents(url: baseURL.appending(path: "integrations/vlmac/preflight"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "network", value: network ? "true" : "false")]
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("integrations/vlmac/preflight")
+        }
+        return try await get(url: url)
     }
 
     func vlmacStart() async throws -> AppSnapshot {
@@ -310,6 +323,10 @@ struct OrchestratorClient {
         try await postWrapped(path: "integrations/ai-manus/session")
     }
 
+    func createChatSession() async throws -> ManusSessionResponse {
+        try await postWrapped(path: "chat/session")
+    }
+
     func manusSessions() async throws -> ManusThreadsResponse {
         try await getWrapped(path: "integrations/ai-manus/sessions")
     }
@@ -353,6 +370,31 @@ struct OrchestratorClient {
             attachments: attachments
         )
         let url = baseURL.appending(path: "integrations/ai-manus/session/\(sessionID)/chat")
+        try await streamChatRequest(url: url, requestBody: requestBody, onEvent: onEvent)
+    }
+
+    func streamChatMessage(
+        sessionID: String,
+        message: String,
+        attachments: [JSONValue]? = nil,
+        eventID: String? = nil,
+        onEvent: @escaping @Sendable (ManusStreamEvent) async -> Void
+    ) async throws {
+        let requestBody = ManusChatRequest(
+            message: message,
+            timestamp: Int(Date().timeIntervalSince1970),
+            eventId: eventID,
+            attachments: attachments
+        )
+        let url = baseURL.appending(path: "chat/session/\(sessionID)/message")
+        try await streamChatRequest(url: url, requestBody: requestBody, onEvent: onEvent)
+    }
+
+    private func streamChatRequest(
+        url: URL,
+        requestBody: ManusChatRequest,
+        onEvent: @escaping @Sendable (ManusStreamEvent) async -> Void
+    ) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 1_800

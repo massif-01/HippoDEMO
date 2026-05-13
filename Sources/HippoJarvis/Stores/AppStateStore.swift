@@ -21,6 +21,7 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var basicMemoryRecent: BasicMemoryRecentResponse = .empty
     @Published private(set) var basicMemoryNotePreview: BasicMemoryNote?
     @Published private(set) var basicMemoryLastSync: BasicMemorySyncResponse?
+    @Published private(set) var vlmacConfig: VlmacConfig = .empty
     @Published private(set) var vlmacPreflight: JSONValue?
     @Published private(set) var contextFragments: [ContextFragment] = []
     @Published private(set) var manusThreads: [ManusThread] = []
@@ -345,6 +346,20 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    func newChatThread() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let response = try await client.createChatSession()
+            manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
+            try await loadManusThreadWithoutBusy(response.sessionId)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     func loadManusThread(_ thread: ManusThread) async {
         await loadManusThread(thread.id)
     }
@@ -387,6 +402,38 @@ final class AppStateStore: ObservableObject {
                 }
             }
             manusThreads = try await client.manusSessions().sessions
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func sendChatMessage(_ content: String, attachments: [JSONValue]? = nil) async {
+        let message = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+
+        manusChatTask?.cancel()
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let sessionID: String
+            if let currentManusThread, !currentManusThread.id.hasPrefix("local-") {
+                sessionID = currentManusThread.id
+            } else {
+                let response = try await client.createChatSession()
+                sessionID = response.sessionId
+                manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
+                try await loadManusThreadWithoutBusy(sessionID)
+            }
+
+            appendLocalManusMessage(role: "user", content: message, attachments: attachments)
+            try await client.streamChatMessage(sessionID: sessionID, message: message, attachments: attachments) { event in
+                await MainActor.run {
+                    self.applyManusStreamEvent(event)
+                }
+            }
+            manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -576,14 +623,15 @@ final class AppStateStore: ObservableObject {
         await run { try await self.client.openChronicleTimelineTick() }
     }
 
-    func refreshVlmacPreflight() async {
+    func refreshVlmacPreflight(network: Bool = false) async {
         isBusy = true
         defer { isBusy = false }
 
         do {
+            vlmacConfig = try await client.vlmacConfig()
             let service = try await client.vlmacStatus()
             applyVlmacService(service)
-            vlmacPreflight = try await client.vlmacPreflight()
+            vlmacPreflight = try await client.vlmacPreflight(network: network)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -600,6 +648,33 @@ final class AppStateStore: ObservableObject {
 
     func vlmacRestart() async {
         await run { try await self.client.vlmacRestart() }
+    }
+
+    func updateVlmacConfig(
+        vlmBaseUrl: String? = nil,
+        vlmModel: String? = nil,
+        vlmApiKey: String? = nil
+    ) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            vlmacConfig = try await client.updateVlmacConfig(
+                VlmacConfigRequest(
+                    vlmBaseUrl: vlmBaseUrl,
+                    vlmModel: vlmModel,
+                    vlmApiKey: vlmApiKey
+                )
+            )
+            let service = try await client.vlmacStatus()
+            applyVlmacService(service)
+            vlmacPreflight = try await client.vlmacPreflight(network: false)
+            snapshot = try await client.state()
+            await refreshEventHistory()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     func cuaDriverStart() async {
@@ -932,6 +1007,10 @@ final class AppStateStore: ObservableObject {
             if let message = makeManusMessage(from: data) {
                 manusMessages.append(message)
             }
+        case "message_delta":
+            appendAssistantMessageDelta(from: data)
+        case "message_complete":
+            break
         case "plan":
             manusPlan = planSteps(from: data)
         case "step":
@@ -959,11 +1038,46 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    private func appendAssistantMessageDelta(from value: JSONValue) {
+        guard case .object(let object) = value else { return }
+        let delta = stringField("content", in: object) ?? stringField("delta", in: object) ?? stringField("answer", in: object)
+        guard let delta, !delta.isEmpty else { return }
+        let eventId = normalizedEventId(from: object)
+        let timestamp = intField("timestamp", in: object)
+
+        if let eventId,
+           let index = manusMessages.lastIndex(where: { $0.role == "assistant" && $0.eventId == eventId }) {
+            manusMessages[index].content += delta
+            manusMessages[index].timestamp = timestamp ?? manusMessages[index].timestamp
+            return
+        }
+
+        if eventId == nil,
+           let index = manusMessages.indices.last,
+           manusMessages[index].role == "assistant",
+           manusMessages[index].eventId == nil {
+            manusMessages[index].content += delta
+            manusMessages[index].timestamp = timestamp ?? manusMessages[index].timestamp
+            return
+        }
+
+        manusMessages.append(
+            ManusMessage(
+                id: eventId ?? "message_delta_\(timestamp ?? Int(Date().timeIntervalSince1970))_\(manusMessages.count)",
+                role: "assistant",
+                content: delta,
+                timestamp: timestamp,
+                eventId: eventId,
+                attachments: arrayField("attachments", in: object)
+            )
+        )
+    }
+
     private func makeManusMessage(from value: JSONValue) -> ManusMessage? {
         guard case .object(let object) = value else { return nil }
         let content = stringField("content", in: object) ?? stringField("message", in: object)
         guard let content else { return nil }
-        let eventId = stringField("event_id", in: object) ?? stringField("eventId", in: object)
+        let eventId = normalizedEventId(from: object)
         let timestamp = intField("timestamp", in: object)
         return ManusMessage(
             id: eventId ?? "message_\(timestamp ?? Int(Date().timeIntervalSince1970))_\(manusMessages.count)",
@@ -991,6 +1105,13 @@ final class AppStateStore: ObservableObject {
             timestamp: intField("timestamp", in: object),
             eventId: stringField("event_id", in: object) ?? stringField("eventId", in: object)
         )
+    }
+
+    private func normalizedEventId(from object: [String: JSONValue]) -> String? {
+        let raw = stringField("event_id", in: object) ?? stringField("eventId", in: object) ?? stringField("message_id", in: object) ?? stringField("messageId", in: object)
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func makeToolEvent(from value: JSONValue) -> ManusToolEvent? {

@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -48,6 +49,7 @@ from .models import (
     ServiceStatus,
     SkillGenerateRequest,
     SkillRecord,
+    VlmacConfigRequest,
     new_id,
     now_iso,
 )
@@ -283,21 +285,68 @@ def _safe_read_text(path: str | None, *, limit: int = 12_000) -> str:
     return value[:limit]
 
 
-def _hippo_agent_skill_input() -> str:
+def _available_skill_summary() -> str:
     if not store.state.skills:
         return ""
     lines = ["# Available Hippo Skills"]
     for skill in store.state.skills[:8]:
-        lines.append(f"- {skill.name}: {skill.description} (id: {skill.id})")
-    latest = store.state.skills[0]
-    content = _safe_read_text(latest.path, limit=10_000)
-    if content:
-        lines.append("\n# Latest Skill.md")
-        lines.append(content)
+        path_stem = Path(skill.path).stem if skill.path else ""
+        lines.append(f"- {skill.name}: {skill.description} (id: {skill.id}, handle: {path_stem})")
     return "\n".join(lines)
 
 
-def _hippo_agent_context_input(session_id: str | None = None, *, limit: int = 16_000) -> str:
+def _skill_markdown(skill: SkillRecord, *, limit: int = 10_000) -> str:
+    content = _safe_read_text(skill.path, limit=limit)
+    if not content:
+        return ""
+    return "\n".join(
+        [
+            f"# Selected Hippo Skill: {skill.name}",
+            f"id: {skill.id}",
+            f"description: {skill.description}",
+            f"path: {skill.path}",
+            "",
+            content,
+        ]
+    )
+
+
+def _find_mentioned_skill(message: str) -> SkillRecord | None:
+    if not store.state.skills:
+        return None
+    mentions = [item.strip().lower() for item in re.findall(r"@([^\s，,。；;：:]+)", message)]
+    if not mentions:
+        return None
+    latest = store.state.skills[0]
+    for mention in mentions:
+        if mention in {"skill", "sop"}:
+            return latest
+        for skill in store.state.skills:
+            candidates = {
+                skill.id.lower(),
+                skill.name.lower(),
+                Path(skill.path).stem.lower() if skill.path else "",
+            }
+            if mention in candidates or any(mention and mention in candidate for candidate in candidates):
+                return skill
+    return None
+
+
+def _is_sop_execution_request(message: str) -> bool:
+    normalized = re.sub(r"\s+", "", message.lower())
+    return any(marker in normalized for marker in {"执行sop", "运行sop", "执行skill", "运行skill"})
+
+
+def _hippo_agent_skill_input(message: str) -> str:
+    skill = _find_mentioned_skill(message)
+    if not skill and _is_sop_execution_request(message) and store.state.skills:
+        skill = store.state.skills[0]
+    if not skill:
+        return ""
+    return _skill_markdown(skill)
+
+
+def _hippo_agent_context_input(message: str, session_id: str | None = None, *, limit: int = 16_000) -> str:
     sections: list[str] = []
     session = store.state.current_session
     if session:
@@ -342,6 +391,13 @@ def _hippo_agent_context_input(session_id: str | None = None, *, limit: int = 16
             task_lines.append(f"- {task.title} ({task.status.value if hasattr(task.status, 'value') else task.status}, id: {task.id})")
         sections.append("\n".join(task_lines))
 
+    skill_summary = _available_skill_summary()
+    if skill_summary:
+        sections.append(skill_summary)
+    mentioned_skill = _find_mentioned_skill(message)
+    if mentioned_skill:
+        sections.append(f"# Routed Skill Mention\nThe user mentioned @{mentioned_skill.name} ({mentioned_skill.id}).")
+
     context = "\n\n".join(section for section in sections if section)
     return context[:limit]
 
@@ -354,33 +410,41 @@ def _chat_route_for_message(message: str, requested_route: str | None = None) ->
         return "manus"
 
     text = message.lower()
-    hippo_agent_markers = [
-        "@skill",
-        "@ skill",
-        "执行sop",
-        "执行 sop",
-        "运行sop",
-        "运行 sop",
-        "预约腾讯会议",
-        "腾讯会议",
-        "tencent meeting",
-        "voov meeting",
-        "预约飞书会议",
-        "飞书会议",
-        "feishu meeting",
-        "lark meeting",
-        "飞书文档",
-        "feishu doc",
-        "feishu docs",
-        "lark doc",
-        "lark docs",
-        "发邮件",
-        "发送邮件",
-        "写邮件",
-        "email",
-        "e-mail",
+    normalized = re.sub(r"\s+", "", text)
+    manus_markers = [
+        "cua",
+        "computer use",
+        "computer-use",
+        "本机操作",
+        "操作本机",
+        "控制电脑",
+        "浏览器",
+        "browser",
+        "sandbox",
+        "沙盒",
+        "代码",
+        "code",
+        "shell",
+        "terminal",
     ]
-    if any(marker in text for marker in hippo_agent_markers):
+    if any(marker in text for marker in manus_markers):
+        return "manus"
+
+    if re.search(r"@\S+", message) or _is_sop_execution_request(message):
+        return "hippo_agent"
+
+    meeting_actions = ["预约", "安排", "创建", "发起", "预定", "订", "schedule", "book", "create"]
+    doc_actions = ["写", "创建", "新建", "更新", "整理", "生成", "修改", "编辑", "draft", "write", "create", "update", "edit"]
+    mail_actions = ["发", "发送", "写", "草拟", "起草", "回复", "send", "draft", "write", "reply"]
+    if any(keyword in text for keyword in ["腾讯会议", "tencent meeting", "voov meeting"]) and any(action in text for action in meeting_actions):
+        return "hippo_agent"
+    if any(keyword in text for keyword in ["飞书会议", "feishu meeting", "lark meeting"]) and any(action in text for action in meeting_actions):
+        return "hippo_agent"
+    if any(keyword in text for keyword in ["飞书文档", "feishu doc", "feishu docs", "lark doc", "lark docs"]) and any(action in text for action in doc_actions):
+        return "hippo_agent"
+    if any(keyword in text for keyword in ["邮件", "email", "e-mail"]) and any(action in text for action in mail_actions):
+        return "hippo_agent"
+    if any(marker in normalized for marker in {"预约腾讯会议", "预约飞书会议", "写飞书文档", "发邮件", "发送邮件", "写邮件"}):
         return "hippo_agent"
     return "manus"
 
@@ -453,6 +517,25 @@ async def _require_ai_manus_online() -> ServiceStatus:
     if service.status != "online":
         raise HTTPException(status_code=503, detail=service.detail or "ai-manus backend unavailable")
     return service
+
+
+async def _ensure_ai_manus_remote_session(thread: AiManusThread) -> AiManusThread:
+    if _ai_manus_remote_session_id_or_none(thread):
+        return thread
+    data = await ai_manus_adapter.create_session()
+    manus_session_id = _ai_manus_session_id(data)
+    if not manus_session_id:
+        raise RuntimeError("ai-manus create session returned no session_id")
+    thread.manus_session_id = manus_session_id
+    thread.metadata["manus_session_id"] = manus_session_id
+    thread.metadata["remote_created_by"] = "hippo-chat-auto-route"
+    await store.save_ai_manus_thread(thread)
+    await store.publish(
+        "ai_manus_session_created",
+        {"session_id": thread.session_id, "manus_session_id": manus_session_id, "source": "hippo-chat-auto-route"},
+        session_id=thread.session_id,
+    )
+    return thread
 
 
 def _ai_manus_files_count(payload: Any) -> int:
@@ -2278,7 +2361,7 @@ async def unified_chat_create_session(request: AiManusCreateSessionRequest | Non
         status="active",
         metadata={
             "source": "hippo-chat",
-            "primary_route": "hippo_agent",
+            "primary_route": "auto",
             **_ai_manus_link_metadata(),
         },
     )
@@ -2287,7 +2370,7 @@ async def unified_chat_create_session(request: AiManusCreateSessionRequest | Non
         await _apply_hippo_agent_status()
         await store.publish(
             "chat_session_created",
-            {"session_id": thread.session_id, "primary_route": "hippo_agent"},
+            {"session_id": thread.session_id, "primary_route": "auto"},
             session_id=thread.session_id,
         )
     return {"session_id": thread.session_id, "thread": _ai_manus_thread_summary(thread)}
@@ -2296,6 +2379,16 @@ async def unified_chat_create_session(request: AiManusCreateSessionRequest | Non
 @app.post("/chat/session/{session_id}/message")
 async def unified_chat_message(session_id: str, request: AiManusChatRequest):
     route = _chat_route_for_message(request.message or "", request.route)
+    await store.publish(
+        "chat_route_selected",
+        {
+            "session_id": session_id,
+            "route": route,
+            "message_chars": len(request.message or ""),
+            "requested_route": request.route or "auto",
+        },
+        session_id=session_id,
+    )
     if route == "hippo_agent":
         return StreamingResponse(_stream_hippo_agent_chat(session_id, request), media_type="text/event-stream")
     return await ai_manus_chat(session_id, request)
@@ -2309,7 +2402,7 @@ async def _stream_hippo_agent_chat(session_id: str, request: AiManusChatRequest)
         return
 
     thread = _refresh_ai_manus_thread_links(thread)
-    thread.metadata["primary_route"] = "hippo_agent"
+    thread.metadata["last_route"] = "hippo_agent"
     await store.save_ai_manus_thread(thread)
 
     status = await _apply_hippo_agent_status()
@@ -2346,10 +2439,10 @@ async def _stream_hippo_agent_chat(session_id: str, request: AiManusChatRequest)
 
         async for sse_event in hippo_agent_adapter.stream_chat(
             query=message,
-            skill=_hippo_agent_skill_input(),
-            context=_hippo_agent_context_input(session_id),
+            skill=_hippo_agent_skill_input(message),
+            context=_hippo_agent_context_input(message, session_id),
             conversation_id=conversation_id or None,
-            files=request.attachments,
+            files=None,
         ):
             event_count += 1
             data = sse_event.get("data") if isinstance(sse_event, dict) else {}
@@ -2362,7 +2455,8 @@ async def _stream_hippo_agent_chat(session_id: str, request: AiManusChatRequest)
                 if chunk:
                     full_answer += chunk
                     conversation_id = str(data.get("conversation_id") or conversation_id or "")
-                    message_id = str(data.get("message_id") or message_id or sse_event.get("id") or "")
+                    if not message_id:
+                        message_id = str(data.get("message_id") or sse_event.get("id") or new_id("hippo_agent_message"))
                     yield _sse(
                         "message_delta",
                         {
@@ -2692,6 +2786,9 @@ async def ai_manus_chat(session_id: str, request: AiManusChatRequest):
         message_chars = len(request.message or "")
         attachments_count = len(request.attachments or [])
         try:
+            thread = await _ensure_ai_manus_remote_session(thread)
+            thread.metadata["last_route"] = "ai_manus"
+            await store.save_ai_manus_thread(thread)
             if request.message:
                 await store.append_ai_manus_message(
                     session_id,
@@ -2981,9 +3078,31 @@ async def vlmac_status():
         return to_dict(service)
 
 
+@app.get("/integrations/vlmac/config")
+async def vlmac_config():
+    return vlmac_adapter.config()
+
+
+@app.post("/integrations/vlmac/config")
+async def vlmac_update_config(request: VlmacConfigRequest):
+    try:
+        config = vlmac_adapter.update_config(
+            vlm_base_url=request.vlm_base_url,
+            vlm_model=request.vlm_model,
+            vlm_api_key=request.vlm_api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    service = await vlmac_adapter.status()
+    async with store._lock:
+        await _apply_vlmac_status(service)
+        await store.publish("vlmac_config_updated", {"config": config, "service": to_dict(service)})
+    return config
+
+
 @app.get("/integrations/vlmac/preflight")
-async def vlmac_preflight():
-    return await vlmac_adapter.preflight()
+async def vlmac_preflight(network: bool = False):
+    return await vlmac_adapter.preflight(network=network)
 
 
 async def _vlmac_command_snapshot(action: str, command) -> dict:

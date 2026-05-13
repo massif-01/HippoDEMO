@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..models import ServiceStatus
+from ..models import ServiceStatus, now_iso
 from .basic_memory import basic_memory_adapter
 
 
@@ -25,7 +25,10 @@ VLMAC_BOOTSTRAP_SCRIPT = PROJECT_DIR / "script" / "bootstrap_vlmac_runtime.sh"
 RUNTIME_DIR = PROJECT_DIR / ".runtime"
 VLMAC_LOG_PATH = RUNTIME_DIR / "vlmac.log"
 VLMAC_PID_PATH = RUNTIME_DIR / "vlmac.pid"
+VLMAC_PROVIDER_CONFIG_PATH = RUNTIME_DIR / "vlmac-provider.json"
 DEFAULT_BASE_URL = "http://127.0.0.1:59092"
+DEFAULT_VLM_OPENAI_BASE_URL = "http://127.0.0.1:58000/v1"
+DEFAULT_VLM_MODEL = "RM-01 VLM"
 STATUS_TIMEOUT_SECONDS = 3.0
 STARTUP_TIMEOUT_SECONDS = 8.0
 
@@ -56,9 +59,43 @@ class VlmacAdapter:
             "python_path": self.python_path(),
             "project_path": basic_memory_config.get("project_path"),
             "storage": "basic-memory-local",
+            "vlm_provider": "openai-compatible",
+            "vlm_base_url": self._vlm_base_url(),
+            "vlm_model": self._vlm_model(),
+            "vlm_api_key_configured": bool(self._vlm_api_key()),
+            "provider_config_path": str(VLMAC_PROVIDER_CONFIG_PATH),
             "log_path": str(VLMAC_LOG_PATH),
             "pid_path": str(VLMAC_PID_PATH),
         }
+
+    def update_config(
+        self,
+        *,
+        vlm_base_url: str | None = None,
+        vlm_model: str | None = None,
+        vlm_api_key: str | None = None,
+    ) -> dict[str, Any]:
+        if vlm_base_url is None and vlm_model is None and vlm_api_key is None:
+            return self.config()
+
+        config = self._read_provider_config()
+        updates = {
+            "vlm_base_url": vlm_base_url,
+            "vlm_model": vlm_model,
+            "vlm_api_key": vlm_api_key,
+        }
+        for key, value in updates.items():
+            if value is None:
+                continue
+            cleaned = str(value).strip()
+            if not cleaned:
+                config.pop(key, None)
+            elif key == "vlm_base_url":
+                config[key] = self._normalize_openai_base_url(cleaned)
+            else:
+                config[key] = cleaned
+        self._write_provider_config(config)
+        return self.config()
 
     @property
     def base_url(self) -> str:
@@ -114,7 +151,8 @@ class VlmacAdapter:
                 name="vlmac",
                 status="online",
                 detail=(
-                    f"base_url={self.base_url}; tasks={tasks_count}; running={running_count}; "
+                    f"base_url={self.base_url}; vlm_api={self._vlm_base_url()}; "
+                    f"tasks={tasks_count}; running={running_count}; "
                     f"storage={storage_path or self._project_path()}"
                 ),
             )
@@ -135,10 +173,13 @@ class VlmacAdapter:
         return ServiceStatus(
             name="vlmac",
             status="unavailable",
-            detail=f"vlmac not running; base_url={self.base_url}; python={self.python_path() or 'missing'}",
+            detail=(
+                f"vlmac not running; base_url={self.base_url}; vlm_api={self._vlm_base_url()}; "
+                f"python={self.python_path() or 'missing'}"
+            ),
         )
 
-    async def preflight(self, *, auto_setup: bool = True) -> dict[str, Any]:
+    async def preflight(self, *, auto_setup: bool = True, network: bool = False) -> dict[str, Any]:
         bootstrap: list[dict[str, Any]] = []
         if auto_setup:
             bootstrap.append(await self._ensure_vlmac_runtime())
@@ -158,11 +199,18 @@ class VlmacAdapter:
         if python:
             imports_ok, imports_detail = await asyncio.to_thread(self._python_import_check, python)
             checks.append(self._check("vlmac_python_imports", imports_ok, imports_detail))
+        if network:
+            vlm_ok, vlm_detail = await self._vlm_models_check()
+        else:
+            vlm_ok = True
+            vlm_detail = f"not checked; base_url={self._vlm_base_url()}; pass network=true to probe /models"
+        checks.append(self._check("vlm_openai_api", vlm_ok, vlm_detail, required=False))
         return {
-            "ok": all(check["ok"] for check in checks),
+            "ok": all(check["ok"] for check in checks if check.get("required", True)),
             "checks": checks,
             "bootstrap": bootstrap,
             "config": self.config(),
+            "network_checked": network,
         }
 
     async def start(self) -> ServiceStatus:
@@ -186,6 +234,10 @@ class VlmacAdapter:
             env = os.environ.copy()
             env["HIPPODEMO_VLMAC_STORAGE"] = "basic-memory-local"
             env["HIPPODEMO_BASIC_MEMORY_PROJECT_DIR"] = str(self._project_path())
+            env["VLLM_BASE_URL"] = self._vlm_base_url()
+            env["VLLM_MODEL"] = self._vlm_model()
+            if self._vlm_api_key():
+                env["VLLM_API_KEY"] = str(self._vlm_api_key())
             command = [python, "-m", "uvicorn", "server:app", "--host", host, "--port", port]
             try:
                 with VLMAC_LOG_PATH.open("ab") as log:
@@ -359,8 +411,111 @@ class VlmacAdapter:
             return True, path
         return False, (result.stderr or result.stdout or "ffmpeg not found").strip()[:500]
 
-    def _check(self, name: str, ok: bool, detail: str) -> dict[str, Any]:
-        return {"name": name, "ok": bool(ok), "detail": detail}
+    async def _vlm_models_check(self) -> tuple[bool, str]:
+        try:
+            async with httpx.AsyncClient(timeout=STATUS_TIMEOUT_SECONDS) as client:
+                response = await client.get(
+                    self._openai_endpoint("models"),
+                    headers=self._vlm_headers(),
+                )
+            if response.status_code != 200:
+                return False, f"HTTP {response.status_code}: {response.text[:300]}"
+            payload = response.json()
+            models = payload.get("data") if isinstance(payload, dict) else None
+            count = len(models) if isinstance(models, list) else 0
+            return count > 0, f"{count} model(s) visible at {self._vlm_base_url()}"
+        except Exception as exc:
+            return False, str(exc)[:500]
+
+    def _vlm_base_url(self) -> str:
+        value = (
+            self._provider_config_value("vlm_base_url")
+            or os.environ.get("HIPPODEMO_VLM_OPENAI_BASE_URL")
+            or os.environ.get("VLLM_BASE_URL")
+            or DEFAULT_VLM_OPENAI_BASE_URL
+        )
+        return self._normalize_openai_base_url(value)
+
+    def _vlm_model(self) -> str:
+        value = (
+            self._provider_config_value("vlm_model")
+            or os.environ.get("HIPPODEMO_VLM_MODEL")
+            or os.environ.get("VLLM_MODEL")
+            or DEFAULT_VLM_MODEL
+        )
+        return str(value).strip() or DEFAULT_VLM_MODEL
+
+    def _vlm_api_key(self) -> str | None:
+        value = (
+            self._provider_config_value("vlm_api_key")
+            or os.environ.get("HIPPODEMO_VLM_API_KEY")
+            or os.environ.get("VLLM_API_KEY")
+            or os.environ.get("OPENAI_API_KEY")
+        )
+        if not value:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    def _vlm_headers(self) -> dict[str, str] | None:
+        api_key = self._vlm_api_key()
+        if not api_key:
+            return None
+        return {"Authorization": f"Bearer {api_key}"}
+
+    def _openai_endpoint(self, path: str) -> str:
+        return f"{self._vlm_base_url().rstrip('/')}/{path.lstrip('/')}"
+
+    def _normalize_openai_base_url(self, value: str) -> str:
+        cleaned = str(value).strip().rstrip("/")
+        if not cleaned:
+            raise ValueError("VLM OpenAI-compatible API base URL cannot be empty")
+        parsed = urlparse(cleaned)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError("VLM OpenAI-compatible API base URL must be an http(s) URL")
+        if not cleaned.endswith("/v1"):
+            cleaned = f"{cleaned}/v1"
+        return cleaned
+
+    def _read_provider_config(self) -> dict[str, Any]:
+        if not VLMAC_PROVIDER_CONFIG_PATH.exists():
+            return {}
+        try:
+            payload = json.loads(VLMAC_PROVIDER_CONFIG_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _write_provider_config(self, payload: dict[str, Any]) -> None:
+        VLMAC_PROVIDER_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        safe_payload: dict[str, Any] = {}
+        base_url = str(payload.get("vlm_base_url") or "").strip()
+        if base_url:
+            safe_payload["vlm_base_url"] = self._normalize_openai_base_url(base_url)
+        model = str(payload.get("vlm_model") or "").strip()
+        if model:
+            safe_payload["vlm_model"] = model
+        api_key = str(payload.get("vlm_api_key") or "").strip()
+        if api_key:
+            safe_payload["vlm_api_key"] = api_key
+        safe_payload["updated_at"] = now_iso()
+        VLMAC_PROVIDER_CONFIG_PATH.write_text(
+            json.dumps(safe_payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+    def _provider_config_value(self, key: str) -> str | None:
+        value = self._read_provider_config().get(key)
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    def _check(self, name: str, ok: bool, detail: str, *, required: bool = True) -> dict[str, Any]:
+        payload = {"name": name, "ok": bool(ok), "detail": detail}
+        if not required:
+            payload["required"] = False
+        return payload
 
     def _tail_log(self, limit: int = 1600) -> str:
         if not VLMAC_LOG_PATH.exists():

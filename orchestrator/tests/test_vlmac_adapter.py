@@ -52,6 +52,27 @@ def test_status_rejects_legacy_vlmac_without_storage_endpoint(tmp_path, monkeypa
     assert "storage status endpoint is unavailable" in (service.detail or "")
 
 
+def test_config_persists_vlm_openai_settings(tmp_path, monkeypatch):
+    provider_config_path = tmp_path / "vlmac-provider.json"
+    monkeypatch.setattr(vlmac, "VLMAC_PROVIDER_CONFIG_PATH", provider_config_path)
+
+    adapter = VlmacAdapter()
+    config = adapter.update_config(
+        vlm_base_url="http://127.0.0.1:58000/v1/",
+        vlm_model="local-vlm",
+        vlm_api_key="sk-test-secret",
+    )
+
+    assert config["vlm_base_url"] == "http://127.0.0.1:58000/v1"
+    assert config["vlm_model"] == "local-vlm"
+    assert config["vlm_api_key_configured"] is True
+    assert "sk-test-secret" not in json.dumps(config)
+    payload = json.loads(provider_config_path.read_text(encoding="utf-8"))
+    assert payload["vlm_base_url"] == "http://127.0.0.1:58000/v1"
+    assert payload["vlm_model"] == "local-vlm"
+    assert payload["vlm_api_key"] == "sk-test-secret"
+
+
 def test_start_injects_basic_memory_storage_env(tmp_path, monkeypatch):
     source_dir = tmp_path / "vlmac"
     source_dir.mkdir()
@@ -60,12 +81,14 @@ def test_start_injects_basic_memory_storage_env(tmp_path, monkeypatch):
     runtime_dir = tmp_path / "runtime"
     log_path = runtime_dir / "vlmac.log"
     pid_path = runtime_dir / "vlmac.pid"
+    provider_config_path = tmp_path / "vlmac-provider.json"
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(vlmac, "VLMAC_DIR", source_dir)
     monkeypatch.setattr(vlmac, "RUNTIME_DIR", runtime_dir)
     monkeypatch.setattr(vlmac, "VLMAC_LOG_PATH", log_path)
     monkeypatch.setattr(vlmac, "VLMAC_PID_PATH", pid_path)
+    monkeypatch.setattr(vlmac, "VLMAC_PROVIDER_CONFIG_PATH", provider_config_path)
 
     class FakeProcess:
         pid = 12345
@@ -102,13 +125,17 @@ def test_start_injects_basic_memory_storage_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr(vlmac.subprocess, "Popen", fake_popen)
 
-    service = run(FakeAdapter().start())
+    adapter = FakeAdapter()
+    adapter.update_config(vlm_base_url="http://vlm.internal:8000/v1", vlm_model="vlm-model")
+    service = run(adapter.start())
 
     env = captured["env"]
     assert service.status == "online"
     assert isinstance(env, dict)
     assert env["HIPPODEMO_VLMAC_STORAGE"] == "basic-memory-local"
     assert env["HIPPODEMO_BASIC_MEMORY_PROJECT_DIR"] == str(project_dir)
+    assert env["VLLM_BASE_URL"] == "http://vlm.internal:8000/v1"
+    assert env["VLLM_MODEL"] == "vlm-model"
     assert captured["cwd"] == str(source_dir)
     assert captured["command"] == ["/tmp/vlmac-python", "-m", "uvicorn", "server:app", "--host", "127.0.0.1", "--port", "59092"]
     assert pid_path.read_text(encoding="utf-8").strip() == "12345"
