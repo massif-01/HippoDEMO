@@ -19,6 +19,37 @@ struct SettingsView: View {
     @State private var aiManusTemperatureDraft = ""
     @State private var aiManusMaxTokensDraft = ""
     @State private var aiManusExtraHeadersDraft = ""
+    @State private var openChronicleModelDraft = ""
+    @State private var openChronicleBaseURLDraft = ""
+    @State private var openChronicleKeyEnvDraft = ""
+    @State private var openChronicleKeyDraft = ""
+    @State private var openChronicleMaxTokensDraft = ""
+    @State private var openChronicleStageDraft = "default"
+    @State private var vlmacServiceBaseURLDraft = ""
+    @State private var vlmacVLLMBaseURLDraft = ""
+    @State private var vlmacModelDraft = ""
+    @State private var vlmacKeyDraft = ""
+    @State private var vlmacTemperatureDraft = ""
+    @State private var vlmacMaxTokensDraft = ""
+    @State private var vlmacTimeoutDraft = ""
+    @State private var basicMemorySemanticEnabledDraft = true
+    @State private var basicMemoryProviderDraft = ""
+    @State private var basicMemoryModelDraft = ""
+    @State private var basicMemoryBaseURLDraft = ""
+    @State private var basicMemoryKeyEnvDraft = ""
+    @State private var basicMemoryKeyDraft = ""
+    @State private var basicMemoryDimensionsDraft = ""
+    @State private var basicMemoryBatchSizeDraft = ""
+    @State private var basicMemoryConcurrencyDraft = ""
+    @State private var basicMemoryTimeoutDraft = ""
+    @State private var projectCortexUseRealDraft = false
+    @State private var projectCortexServiceBaseURLDraft = ""
+    @State private var projectCortexOpenAIBaseURLDraft = ""
+    @State private var projectCortexModelDraft = ""
+    @State private var projectCortexKeyDraft = ""
+    @State private var projectCortexTemperatureDraft = ""
+    @State private var projectCortexMaxTokensDraft = ""
+    @State private var projectCortexTimeoutDraft = ""
 
     private let serviceColumns = [
         GridItem(.adaptive(minimum: 210), spacing: 10, alignment: .top)
@@ -32,6 +63,9 @@ struct SettingsView: View {
                 serviceMatrix
                 ownscribeAudioConsole
                 aiManusRuntimeConsole
+                projectCortexSkillConsole
+                basicMemoryEmbeddingConsole
+                vlmacRuntimeConsole
                 openChronicleConsole
                 cuaDriverConsole
                 secondaryControls
@@ -44,14 +78,31 @@ struct SettingsView: View {
             await store.bootstrap()
             await store.refreshOwnscribeConsole()
             await store.refreshManus()
+            await store.refreshProviderConsoles()
             syncProviderDrafts()
             syncAiManusDrafts()
+            syncOpenChronicleDrafts()
+            syncVlmacDrafts()
+            syncBasicMemoryDrafts()
+            syncProjectCortexDrafts()
         }
         .onChange(of: store.ownscribeConfig) {
             syncProviderDrafts()
         }
         .onChange(of: store.aiManusConfig) {
             syncAiManusDrafts()
+        }
+        .onChange(of: store.openChronicleModelConfig) {
+            syncOpenChronicleDrafts()
+        }
+        .onChange(of: store.vlmacConfig) {
+            syncVlmacDrafts()
+        }
+        .onChange(of: store.basicMemoryEmbeddingConfig) {
+            syncBasicMemoryDrafts()
+        }
+        .onChange(of: store.projectCortexConfig) {
+            syncProjectCortexDrafts()
         }
     }
 
@@ -237,7 +288,7 @@ struct SettingsView: View {
             Divider()
 
             HStack(spacing: 8) {
-                Text(store.text(.runtimeProvider))
+                Text("OpenAI Compatible API · ownscribe ASR + Summary")
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundStyle(.secondary)
@@ -277,7 +328,7 @@ struct SettingsView: View {
     }
 
     private var aiManusRuntimeConsole: some View {
-        HUDSection("ai-manus Runtime", systemImage: "cpu") {
+        HUDSection("OpenAI Compatible API · ai-manus Agent", systemImage: "cpu") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     if let aiManusService {
@@ -310,9 +361,9 @@ struct SettingsView: View {
                     providerField("Frontend URL", text: $aiManusFrontendURLDraft)
                     providerField("AUTH_PROVIDER", text: $aiManusAuthProviderDraft)
                     providerField("Timeout seconds", text: $aiManusTimeoutDraft)
-                    providerField("API_BASE", text: $aiManusAPIBaseDraft)
-                    providerField("MODEL_NAME", text: $aiManusModelDraft)
-                    providerSecureField("API_KEY", text: $aiManusKeyDraft)
+                    providerField("OpenAI Compatible Base URL", text: $aiManusAPIBaseDraft)
+                    providerField("Agent Model", text: $aiManusModelDraft)
+                    providerSecureField("Agent API Key", text: $aiManusKeyDraft)
                     providerField("TEMPERATURE", text: $aiManusTemperatureDraft)
                     providerField("MAX_TOKENS", text: $aiManusMaxTokensDraft)
                 }
@@ -384,6 +435,191 @@ struct SettingsView: View {
         }
     }
 
+    private var projectCortexSkillConsole: some View {
+        HUDSection("OpenAI Compatible API · Skill Generator", systemImage: "wand.and.stars") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let projectCortexService {
+                        ServiceLight(
+                            service: projectCortexService,
+                            title: "Project_Cortex",
+                            detail: store.serviceDetail(projectCortexService.detail, status: projectCortexService.status)
+                        )
+                    } else {
+                        Text(store.text(.notReported))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(
+                        store.projectCortexConfig.openaiApiKeyConfigured == true ? "available" : "stopped",
+                        title: store.projectCortexConfig.openaiApiKeyConfigured == true ? "skill key set" : "skill key optional"
+                    )
+                    if store.projectCortexConfig.useReal == true {
+                        statusBadge("available", title: "Project_Cortex service")
+                    }
+                }
+
+                Divider()
+
+                Toggle("Use Project_Cortex service instead of direct OpenAI-compatible fallback", isOn: $projectCortexUseRealDraft)
+                    .toggleStyle(.switch)
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    providerField("Project_Cortex Service URL", text: $projectCortexServiceBaseURLDraft)
+                    providerField("OpenAI Compatible Base URL", text: $projectCortexOpenAIBaseURLDraft)
+                    providerField("Skill Model", text: $projectCortexModelDraft)
+                    providerSecureField("Skill API Key", text: $projectCortexKeyDraft)
+                    providerField("Temperature", text: $projectCortexTemperatureDraft)
+                    providerField("Max Tokens", text: $projectCortexMaxTokensDraft)
+                    providerField("Timeout seconds", text: $projectCortexTimeoutDraft)
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Save Skill Generator", icon: "square.and.arrow.down", tone: .primary) {
+                        await saveProjectCortexConfig()
+                    }
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshProviderConsoles()
+                        syncProjectCortexDrafts()
+                    }
+                    Text(projectCortexDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var basicMemoryEmbeddingConsole: some View {
+        HUDSection("OpenAI Compatible API · Basic Memory Embeddings", systemImage: "brain") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let basicMemoryService {
+                        ServiceLight(
+                            service: basicMemoryService,
+                            title: "basic-memory",
+                            detail: store.serviceDetail(basicMemoryService.detail, status: basicMemoryService.status)
+                        )
+                    } else {
+                        Text(store.text(.notReported))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(
+                        store.basicMemoryEmbeddingConfig.semanticEmbeddingApiKeyConfigured == true ? "available" : "stopped",
+                        title: store.basicMemoryEmbeddingConfig.semanticEmbeddingApiKeyConfigured == true ? "embedding key set" : "embedding key missing"
+                    )
+                    if store.basicMemoryEmbeddingConfig.restartRequired == true {
+                        statusBadge("mock", title: "restart required")
+                    }
+                }
+
+                Divider()
+
+                Toggle("Semantic search", isOn: $basicMemorySemanticEnabledDraft)
+                    .toggleStyle(.switch)
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    providerField("Provider (fastembed/openai-compatible)", text: $basicMemoryProviderDraft)
+                    providerField("Embedding Model", text: $basicMemoryModelDraft)
+                    providerField("Embedding Base URL", text: $basicMemoryBaseURLDraft)
+                    providerSecureField("Embedding API Key", text: $basicMemoryKeyDraft)
+                    providerField("API Key Env", text: $basicMemoryKeyEnvDraft)
+                    providerField("Dimensions", text: $basicMemoryDimensionsDraft)
+                    providerField("Batch Size", text: $basicMemoryBatchSizeDraft)
+                    providerField("Request Concurrency", text: $basicMemoryConcurrencyDraft)
+                    providerField("Timeout seconds", text: $basicMemoryTimeoutDraft)
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Save Basic Memory", icon: "square.and.arrow.down", tone: .primary) {
+                        await saveBasicMemoryConfig()
+                    }
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshProviderConsoles()
+                        syncBasicMemoryDrafts()
+                    }
+                    Text(basicMemoryDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var vlmacRuntimeConsole: some View {
+        HUDSection("OpenAI Compatible API · vlmac VLM", systemImage: "eye") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let vlmacService {
+                        ServiceLight(
+                            service: vlmacService,
+                            title: "vlmac",
+                            detail: store.serviceDetail(vlmacService.detail, status: vlmacService.status)
+                        )
+                    } else {
+                        Text(store.text(.notReported))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(
+                        store.vlmacConfig.vllmApiKeyConfigured == true ? "available" : "stopped",
+                        title: store.vlmacConfig.vllmApiKeyConfigured == true ? "VLM key set" : "VLM key optional"
+                    )
+                    if store.vlmacConfig.restartRequired == true {
+                        statusBadge("mock", title: "restart vlmac")
+                    }
+                }
+
+                Divider()
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    providerField("vlmac Service URL", text: $vlmacServiceBaseURLDraft)
+                    providerField("OpenAI Compatible Base URL", text: $vlmacVLLMBaseURLDraft)
+                    providerField("Vision Model", text: $vlmacModelDraft)
+                    providerSecureField("Vision API Key", text: $vlmacKeyDraft)
+                    providerField("Temperature", text: $vlmacTemperatureDraft)
+                    providerField("Max Tokens", text: $vlmacMaxTokensDraft)
+                    providerField("Timeout seconds", text: $vlmacTimeoutDraft)
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Save vlmac", icon: "square.and.arrow.down", tone: .primary) {
+                        await saveVlmacConfig()
+                    }
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshProviderConsoles()
+                        syncVlmacDrafts()
+                    }
+                    Text(vlmacRuntimeDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
     private var openChronicleConsole: some View {
         HUDSection(store.text(.openChronicleControls), systemImage: "record.circle") {
             VStack(alignment: .leading, spacing: 12) {
@@ -420,6 +656,49 @@ struct SettingsView: View {
                     commandButton(store.text(.captureOnce), icon: "camera.viewfinder", tone: .quiet) { await store.openChronicleCaptureOnce() }
                     commandButton(store.text(.timelineTick), icon: "clock.arrow.circlepath", tone: .quiet) { await store.openChronicleTimelineTick() }
                     commandButton(store.text(.rebuildCapturesIndex), icon: "arrow.triangle.2.circlepath", tone: .amber) { await store.openChronicleRebuildCapturesIndex() }
+                }
+
+                Divider()
+
+                HStack(spacing: 8) {
+                    Text("OpenAI Compatible API · OpenChronicle Writer")
+                        .font(.caption)
+                        .fontWeight(.medium)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    statusBadge(
+                        store.openChronicleModelConfig.apiKeyConfigured == true ? "available" : "stopped",
+                        title: store.openChronicleModelConfig.apiKeyConfigured == true ? "key set" : "key missing"
+                    )
+                    if store.openChronicleModelConfig.restartRequired == true {
+                        statusBadge("mock", title: "restart OpenChronicle")
+                    }
+                }
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    providerField("Stage (default/timeline/reducer/classifier/compact)", text: $openChronicleStageDraft)
+                    providerField("Model", text: $openChronicleModelDraft)
+                    providerField("Base URL", text: $openChronicleBaseURLDraft)
+                    providerField("API Key Env", text: $openChronicleKeyEnvDraft)
+                    providerSecureField("API Key", text: $openChronicleKeyDraft)
+                    providerField("Max Tokens", text: $openChronicleMaxTokensDraft)
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Save OpenChronicle Model", icon: "square.and.arrow.down", tone: .primary) {
+                        await saveOpenChronicleConfig()
+                    }
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshProviderConsoles()
+                        syncOpenChronicleDrafts()
+                    }
+                    Text(openChronicleModelDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
                 }
             }
         }
@@ -497,6 +776,18 @@ struct SettingsView: View {
         store.snapshot.services.first { $0.name.lowercased() == "cua-driver" }
     }
 
+    private var vlmacService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "vlmac" }
+    }
+
+    private var basicMemoryService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "basic-memory" }
+    }
+
+    private var projectCortexService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "project_cortex" || $0.name.lowercased() == "project-cortex" }
+    }
+
     private var ownscribeService: ServiceStatus? {
         store.snapshot.services.first { $0.name.lowercased() == "ownscribe" }
     }
@@ -525,6 +816,31 @@ struct SettingsView: View {
         let lines = store.aiManusRuntimeLogs.lines
         if lines.count <= 6 { return lines }
         return Array(lines.suffix(6))
+    }
+
+    private var openChronicleModelDetail: String {
+        let path = store.openChronicleModelConfig.configPath ?? "~/.openchronicle/config.toml"
+        let source = store.openChronicleModelConfig.configExists == true ? "config" : "will create config"
+        return "\(path) · \(source)"
+    }
+
+    private var vlmacRuntimeDetail: String {
+        let env = store.vlmacConfig.envPath ?? "vlmac/.env"
+        let restart = store.vlmacConfig.restartRequired == true ? " · restart vlmac to apply" : ""
+        return "\(env)\(restart)"
+    }
+
+    private var basicMemoryDetail: String {
+        let path = store.basicMemoryEmbeddingConfig.configPath ?? "orchestrator/data/basic_memory/config/config.json"
+        let project = store.basicMemoryEmbeddingConfig.projectPath ?? "hippo"
+        let restart = store.basicMemoryEmbeddingConfig.restartRequired == true ? " · rebuild/restart Basic Memory to apply" : ""
+        return "\(path) · \(project)\(restart)"
+    }
+
+    private var projectCortexDetail: String {
+        let path = store.projectCortexConfig.configPath ?? "orchestrator/data/project_cortex_config.json"
+        let mode = store.projectCortexConfig.useReal == true ? "Project_Cortex service" : "direct OpenAI-compatible fallback"
+        return "\(path) · \(mode)"
     }
 
     private func audioSourceLabel(_ source: OwnscribeAudioSource) -> String {
@@ -619,6 +935,104 @@ struct SettingsView: View {
         )
         aiManusKeyDraft = ""
         syncAiManusDrafts()
+    }
+
+    private func saveOpenChronicleConfig() async {
+        await store.updateOpenChronicleModelConfig(
+            stage: nonEmpty(openChronicleStageDraft),
+            model: nonEmpty(openChronicleModelDraft),
+            baseUrl: nonEmpty(openChronicleBaseURLDraft),
+            apiKeyEnv: nonEmpty(openChronicleKeyEnvDraft),
+            apiKey: nonEmpty(openChronicleKeyDraft),
+            maxTokens: intValue(openChronicleMaxTokensDraft)
+        )
+        openChronicleKeyDraft = ""
+        syncOpenChronicleDrafts()
+    }
+
+    private func syncOpenChronicleDrafts() {
+        openChronicleStageDraft = store.openChronicleModelConfig.stage ?? "default"
+        openChronicleModelDraft = store.openChronicleModelConfig.model ?? ""
+        openChronicleBaseURLDraft = store.openChronicleModelConfig.baseUrl ?? ""
+        openChronicleKeyEnvDraft = store.openChronicleModelConfig.apiKeyEnv ?? "OPENAI_API_KEY"
+        openChronicleMaxTokensDraft = store.openChronicleModelConfig.maxTokens.map(String.init) ?? ""
+    }
+
+    private func saveVlmacConfig() async {
+        await store.updateVlmacConfig(
+            serviceBaseUrl: nonEmpty(vlmacServiceBaseURLDraft),
+            vllmBaseUrl: nonEmpty(vlmacVLLMBaseURLDraft),
+            vllmModel: nonEmpty(vlmacModelDraft),
+            vllmApiKey: nonEmpty(vlmacKeyDraft),
+            temperature: doubleValue(vlmacTemperatureDraft),
+            maxTokens: intValue(vlmacMaxTokensDraft),
+            timeoutSeconds: doubleValue(vlmacTimeoutDraft)
+        )
+        vlmacKeyDraft = ""
+        syncVlmacDrafts()
+    }
+
+    private func syncVlmacDrafts() {
+        vlmacServiceBaseURLDraft = store.vlmacConfig.serviceBaseUrl ?? ""
+        vlmacVLLMBaseURLDraft = store.vlmacConfig.vllmBaseUrl ?? ""
+        vlmacModelDraft = store.vlmacConfig.vllmModel ?? ""
+        vlmacTemperatureDraft = store.vlmacConfig.temperature.map { formatNumber($0) } ?? ""
+        vlmacMaxTokensDraft = store.vlmacConfig.maxTokens.map(String.init) ?? ""
+        vlmacTimeoutDraft = store.vlmacConfig.timeoutSeconds.map { formatNumber($0) } ?? ""
+    }
+
+    private func saveBasicMemoryConfig() async {
+        await store.updateBasicMemoryEmbeddingConfig(
+            semanticSearchEnabled: basicMemorySemanticEnabledDraft,
+            semanticEmbeddingProvider: nonEmpty(basicMemoryProviderDraft),
+            semanticEmbeddingModel: nonEmpty(basicMemoryModelDraft),
+            semanticEmbeddingBaseUrl: nonEmpty(basicMemoryBaseURLDraft),
+            semanticEmbeddingApiKey: nonEmpty(basicMemoryKeyDraft),
+            semanticEmbeddingApiKeyEnv: nonEmpty(basicMemoryKeyEnvDraft),
+            semanticEmbeddingDimensions: intValue(basicMemoryDimensionsDraft),
+            semanticEmbeddingBatchSize: intValue(basicMemoryBatchSizeDraft),
+            semanticEmbeddingRequestConcurrency: intValue(basicMemoryConcurrencyDraft),
+            semanticEmbeddingTimeout: doubleValue(basicMemoryTimeoutDraft)
+        )
+        basicMemoryKeyDraft = ""
+        syncBasicMemoryDrafts()
+    }
+
+    private func syncBasicMemoryDrafts() {
+        basicMemorySemanticEnabledDraft = store.basicMemoryEmbeddingConfig.semanticSearchEnabled ?? true
+        basicMemoryProviderDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingProvider ?? ""
+        basicMemoryModelDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingModel ?? ""
+        basicMemoryBaseURLDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingBaseUrl ?? ""
+        basicMemoryKeyEnvDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingApiKeyEnv ?? "OPENAI_API_KEY"
+        basicMemoryDimensionsDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingDimensions.map(String.init) ?? ""
+        basicMemoryBatchSizeDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingBatchSize.map(String.init) ?? ""
+        basicMemoryConcurrencyDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingRequestConcurrency.map(String.init) ?? ""
+        basicMemoryTimeoutDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingTimeout.map { formatNumber($0) } ?? ""
+    }
+
+    private func saveProjectCortexConfig() async {
+        await store.updateProjectCortexConfig(
+            useReal: projectCortexUseRealDraft,
+            serviceBaseUrl: nonEmpty(projectCortexServiceBaseURLDraft),
+            openaiBaseUrl: nonEmpty(projectCortexOpenAIBaseURLDraft),
+            openaiModel: nonEmpty(projectCortexModelDraft),
+            openaiApiKey: nonEmpty(projectCortexKeyDraft),
+            temperature: doubleValue(projectCortexTemperatureDraft),
+            maxTokens: intValue(projectCortexMaxTokensDraft),
+            timeoutSeconds: doubleValue(projectCortexTimeoutDraft)
+        )
+        projectCortexKeyDraft = ""
+        syncProjectCortexDrafts()
+    }
+
+    private func syncProjectCortexDrafts() {
+        projectCortexUseRealDraft = store.projectCortexConfig.useReal ?? false
+        projectCortexServiceBaseURLDraft = store.projectCortexConfig.serviceBaseUrl ?? ""
+        projectCortexOpenAIBaseURLDraft = store.projectCortexConfig.openaiBaseUrl ?? ""
+        projectCortexModelDraft = store.projectCortexConfig.openaiModel ?? ""
+        projectCortexTemperatureDraft = store.projectCortexConfig.temperature.map { formatNumber($0) } ?? ""
+        projectCortexMaxTokensDraft = store.projectCortexConfig.maxTokens.map(String.init) ?? ""
+        projectCortexTimeoutDraft = store.projectCortexConfig.timeoutSeconds.map { formatNumber($0) } ?? ""
     }
 
     private func syncAiManusDrafts() {

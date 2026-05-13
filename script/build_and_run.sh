@@ -11,8 +11,12 @@ DIST_DIR="$ROOT_DIR/dist"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 APP_BINARY="$APP_MACOS/$APP_NAME"
 INFO_PLIST="$APP_CONTENTS/Info.plist"
+APP_ICON_NAME="HippoJarvis"
+APP_ICON_SOURCE="$ROOT_DIR/Sources/HippoJarvis/Resources/HippoJarvis.icns"
+MENU_BAR_ICON_SOURCE="$ROOT_DIR/Sources/HippoJarvis/Resources/HippoJarvisIcon.png"
 
 cd "$ROOT_DIR"
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
@@ -47,18 +51,32 @@ case "$MODE" in
       echo "$APP_BINARY does not exist; run $0 --verify once to build the app bundle" >&2
       exit 2
     fi
+    "$ROOT_DIR/script/bootstrap_runtimes.sh" --check
     /usr/bin/open -n "$APP_BUNDLE"
     verify_launch
     ;;
+  --bootstrap-runtime|bootstrap-runtime)
+    "$ROOT_DIR/script/bootstrap_runtimes.sh"
+    exit 0
+    ;;
 esac
 
+"$ROOT_DIR/script/bootstrap_runtimes.sh"
+
 swift build --product "$APP_NAME"
-BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
+BUILD_DIR="$(swift build --show-bin-path)"
+BUILD_BINARY="$BUILD_DIR/$APP_NAME"
 
 rm -rf "$APP_BUNDLE"
-mkdir -p "$APP_MACOS"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 cp "$BUILD_BINARY" "$APP_BINARY"
 chmod +x "$APP_BINARY"
+if [[ -f "$APP_ICON_SOURCE" ]]; then
+  cp "$APP_ICON_SOURCE" "$APP_RESOURCES/$APP_ICON_NAME.icns"
+fi
+if [[ -f "$MENU_BAR_ICON_SOURCE" ]]; then
+  cp "$MENU_BAR_ICON_SOURCE" "$APP_RESOURCES/HippoJarvisIcon.png"
+fi
 
 cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -69,6 +87,8 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$APP_NAME</string>
   <key>CFBundleIdentifier</key>
   <string>$BUNDLE_ID</string>
+  <key>CFBundleIconFile</key>
+  <string>$APP_ICON_NAME</string>
   <key>CFBundleName</key>
   <string>$APP_NAME</string>
   <key>CFBundlePackageType</key>

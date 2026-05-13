@@ -62,6 +62,10 @@ struct OrchestratorClient {
         try await getSnapshot(path: "state")
     }
 
+    func plan() async throws -> PlanStatus {
+        try await get(path: "plan")
+    }
+
     func eventHistory(limit: Int = 50) async throws -> [EventRecord] {
         var components = URLComponents(url: baseURL.appending(path: "events/history"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
@@ -95,6 +99,22 @@ struct OrchestratorClient {
 
     func captureFinish() async throws -> AppSnapshot {
         try await postSnapshot(path: "sop/capture-finish")
+    }
+
+    func highlight() async throws -> AppSnapshot {
+        try await postSnapshot(path: "highlight")
+    }
+
+    func frontmost() async throws -> ForegroundAXSnapshot {
+        try await get(path: "frontmost")
+    }
+
+    func followUp() async throws -> FollowUpPackage {
+        try await postWrapped(path: "follow-up")
+    }
+
+    func mailDraft() async throws -> MailDraftInsertResult {
+        try await postWrapped(path: "mail-draft")
     }
 
     func generateActiveTask() async throws -> AppSnapshot {
@@ -147,6 +167,50 @@ struct OrchestratorClient {
 
     func openChronicleTimelineTick() async throws -> AppSnapshot {
         try await postSnapshot(path: "integrations/openchronicle/timeline-tick")
+    }
+
+    func openChronicleModelConfig() async throws -> OpenChronicleModelConfig {
+        try await get(path: "integrations/openchronicle/model-config")
+    }
+
+    func updateOpenChronicleModelConfig(_ request: OpenChronicleModelConfigUpdateRequest) async throws -> OpenChronicleModelConfig {
+        try await post(path: "integrations/openchronicle/model-config", body: request)
+    }
+
+    func vlmacConfig() async throws -> VlmacConfig {
+        try await get(path: "integrations/vlmac/config")
+    }
+
+    func vlmacStatus() async throws -> ServiceStatus {
+        try await get(path: "integrations/vlmac/status")
+    }
+
+    func updateVlmacConfig(_ request: VlmacConfigUpdateRequest) async throws -> VlmacConfig {
+        try await post(path: "integrations/vlmac/config", body: request)
+    }
+
+    func basicMemoryEmbeddingConfig() async throws -> BasicMemoryEmbeddingConfig {
+        try await get(path: "integrations/basic-memory/embedding-config")
+    }
+
+    func basicMemoryStatus() async throws -> ServiceStatus {
+        try await get(path: "integrations/basic-memory/status")
+    }
+
+    func updateBasicMemoryEmbeddingConfig(_ request: BasicMemoryEmbeddingConfigUpdateRequest) async throws -> BasicMemoryEmbeddingConfig {
+        try await post(path: "integrations/basic-memory/embedding-config", body: request)
+    }
+
+    func projectCortexConfig() async throws -> ProjectCortexConfig {
+        try await get(path: "integrations/project-cortex/config")
+    }
+
+    func projectCortexStatus() async throws -> ServiceStatus {
+        try await get(path: "integrations/project-cortex/status")
+    }
+
+    func updateProjectCortexConfig(_ request: ProjectCortexConfigUpdateRequest) async throws -> ProjectCortexConfig {
+        try await post(path: "integrations/project-cortex/config", body: request)
     }
 
     func ownscribeConfig() async throws -> OwnscribeConfig {

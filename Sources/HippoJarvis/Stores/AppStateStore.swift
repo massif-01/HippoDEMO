@@ -10,6 +10,11 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var ownscribeConfig: OwnscribeConfig = .empty
     @Published private(set) var ownscribeDevices: OwnscribeAudioDevicesResponse = .empty
     @Published private(set) var ownscribePreflight: OwnscribePreflight = .empty
+    @Published private(set) var openChronicleModelConfig: OpenChronicleModelConfig = .empty
+    @Published private(set) var vlmacConfig: VlmacConfig = .empty
+    @Published private(set) var basicMemoryEmbeddingConfig: BasicMemoryEmbeddingConfig = .empty
+    @Published private(set) var projectCortexConfig: ProjectCortexConfig = .empty
+    @Published private(set) var planStatus: PlanStatus = .empty
     @Published private(set) var cuaTargetSurface: CuaTargetSurface = .empty
     @Published private(set) var aiManusConfig: AiManusConfig = .empty
     @Published private(set) var aiManusStatus: AiManusStatus = .empty
@@ -83,7 +88,7 @@ final class AppStateStore: ObservableObject {
     var manusConfig: AiManusConfig { aiManusConfig }
     var manusFiles: [ManusFileInfo] { manusFilesResponse.files }
     var canInsertCurrentTask: Bool {
-        guard let task = snapshot.currentTask, cuaTargetSurface.safe, !isBusy else { return false }
+        guard let task = snapshot.currentTask, !isBusy else { return false }
         let insertStatus = task.proposedActions.first?.status ?? "proposed"
         return !["inserted", "insert_requested"].contains(insertStatus)
     }
@@ -102,9 +107,42 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    func refreshPlan() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            planStatus = try await client.plan()
+            applyPlanStatus(planStatus)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     func detectIntervention() async {
-        await run {
+        await run(refreshTargetSurface: false) {
             try await self.client.detectIntervention()
+        }
+    }
+
+    func highlight() async {
+        await run {
+            try await self.client.highlight()
+        }
+    }
+
+    func refreshFrontmost() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let frontmost = try await client.frontmost()
+            snapshot.frontmostContext = frontmost
+            planStatus.frontmostContext = frontmost
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
         }
     }
 
@@ -116,6 +154,156 @@ final class AppStateStore: ObservableObject {
             ownscribeConfig = try await client.ownscribeConfig()
             ownscribeDevices = try await client.ownscribeAudioDevices()
             ownscribePreflight = try await client.ownscribePreflight(network: networkPreflight)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func refreshProviderConsoles() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            openChronicleModelConfig = try await client.openChronicleModelConfig()
+            vlmacConfig = try await client.vlmacConfig()
+            applyServiceStatus(try await client.vlmacStatus())
+            basicMemoryEmbeddingConfig = try await client.basicMemoryEmbeddingConfig()
+            applyServiceStatus(try await client.basicMemoryStatus())
+            projectCortexConfig = try await client.projectCortexConfig()
+            applyServiceStatus(try await client.projectCortexStatus())
+            snapshot = try await client.state()
+            applyPlanFields(from: snapshot)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func updateOpenChronicleModelConfig(
+        stage: String? = nil,
+        model: String? = nil,
+        baseUrl: String? = nil,
+        apiKeyEnv: String? = nil,
+        apiKey: String? = nil,
+        maxTokens: Int? = nil
+    ) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            openChronicleModelConfig = try await client.updateOpenChronicleModelConfig(
+                OpenChronicleModelConfigUpdateRequest(
+                    stage: stage ?? "default",
+                    model: model,
+                    baseUrl: baseUrl,
+                    apiKeyEnv: apiKeyEnv,
+                    apiKey: apiKey,
+                    maxTokens: maxTokens
+                )
+            )
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func updateVlmacConfig(
+        serviceBaseUrl: String? = nil,
+        vllmBaseUrl: String? = nil,
+        vllmModel: String? = nil,
+        vllmApiKey: String? = nil,
+        temperature: Double? = nil,
+        maxTokens: Int? = nil,
+        timeoutSeconds: Double? = nil
+    ) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            vlmacConfig = try await client.updateVlmacConfig(
+                VlmacConfigUpdateRequest(
+                    serviceBaseUrl: serviceBaseUrl,
+                    vllmBaseUrl: vllmBaseUrl,
+                    vllmModel: vllmModel,
+                    vllmApiKey: vllmApiKey,
+                    temperature: temperature,
+                    maxTokens: maxTokens,
+                    timeoutSeconds: timeoutSeconds
+                )
+            )
+            snapshot = try await client.state()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func updateBasicMemoryEmbeddingConfig(
+        semanticSearchEnabled: Bool? = nil,
+        semanticEmbeddingProvider: String? = nil,
+        semanticEmbeddingModel: String? = nil,
+        semanticEmbeddingBaseUrl: String? = nil,
+        semanticEmbeddingApiKey: String? = nil,
+        semanticEmbeddingApiKeyEnv: String? = nil,
+        semanticEmbeddingDimensions: Int? = nil,
+        semanticEmbeddingBatchSize: Int? = nil,
+        semanticEmbeddingRequestConcurrency: Int? = nil,
+        semanticEmbeddingTimeout: Double? = nil
+    ) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            basicMemoryEmbeddingConfig = try await client.updateBasicMemoryEmbeddingConfig(
+                BasicMemoryEmbeddingConfigUpdateRequest(
+                    semanticSearchEnabled: semanticSearchEnabled,
+                    semanticEmbeddingProvider: semanticEmbeddingProvider,
+                    semanticEmbeddingModel: semanticEmbeddingModel,
+                    semanticEmbeddingBaseUrl: semanticEmbeddingBaseUrl,
+                    semanticEmbeddingApiKey: semanticEmbeddingApiKey,
+                    semanticEmbeddingApiKeyEnv: semanticEmbeddingApiKeyEnv,
+                    semanticEmbeddingDimensions: semanticEmbeddingDimensions,
+                    semanticEmbeddingBatchSize: semanticEmbeddingBatchSize,
+                    semanticEmbeddingRequestConcurrency: semanticEmbeddingRequestConcurrency,
+                    semanticEmbeddingTimeout: semanticEmbeddingTimeout
+                )
+            )
+            snapshot = try await client.state()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func updateProjectCortexConfig(
+        useReal: Bool? = nil,
+        serviceBaseUrl: String? = nil,
+        openaiBaseUrl: String? = nil,
+        openaiModel: String? = nil,
+        openaiApiKey: String? = nil,
+        temperature: Double? = nil,
+        maxTokens: Int? = nil,
+        timeoutSeconds: Double? = nil
+    ) async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            projectCortexConfig = try await client.updateProjectCortexConfig(
+                ProjectCortexConfigUpdateRequest(
+                    useReal: useReal,
+                    serviceBaseUrl: serviceBaseUrl,
+                    openaiBaseUrl: openaiBaseUrl,
+                    openaiModel: openaiModel,
+                    openaiApiKey: openaiApiKey,
+                    temperature: temperature,
+                    maxTokens: maxTokens,
+                    timeoutSeconds: timeoutSeconds
+                )
+            )
+            applyServiceStatus(try await client.projectCortexStatus())
+            snapshot = try await client.state()
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -377,7 +565,8 @@ final class AppStateStore: ObservableObject {
     }
 
     func jarvisOff() async {
-        await run { try await self.client.jarvisOff() }
+        cuaTargetSurface = .empty
+        await run(refreshTargetSurface: false) { try await self.client.jarvisOff() }
     }
 
     func pause() async {
@@ -398,6 +587,41 @@ final class AppStateStore: ObservableObject {
 
     func generateActiveTask() async {
         await run { try await self.client.generateActiveTask() }
+    }
+
+    func generateFollowUp() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let package = try await client.followUp()
+            snapshot.followUpPackage = package
+            planStatus.followUpPackage = package
+            snapshot = try await client.state()
+            applyPlanFields(from: snapshot)
+            await refreshEventHistory()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func mailDraft() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let result = try await client.mailDraft()
+            snapshot.mailDraftInsertResult = result
+            planStatus.mailDraftInsertResult = result
+            snapshot = try await client.state()
+            applyPlanFields(from: snapshot)
+            await refreshCuaTargetSurface()
+            await refreshEventHistory()
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     func confirmCurrentTask() async {
@@ -449,6 +673,30 @@ final class AppStateStore: ObservableObject {
 
     func openChronicleTimelineTick() async {
         await run { try await self.client.openChronicleTimelineTick() }
+    }
+
+    func refreshBasicMemoryStatus() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            applyServiceStatus(try await client.basicMemoryStatus())
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func refreshVlmacStatus() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            applyServiceStatus(try await client.vlmacStatus())
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
     }
 
     func cuaDriverStart() async {
@@ -530,15 +778,20 @@ final class AppStateStore: ObservableObject {
         AppCopy.serviceDetail(detail, status: status, language: language)
     }
 
-    private func run(_ operation: @escaping () async throws -> AppSnapshot) async {
+    private func run(refreshTargetSurface: Bool = false, _ operation: @escaping () async throws -> AppSnapshot) async {
         isBusy = true
         defer { isBusy = false }
 
         do {
             let next = try await operation()
             snapshot = next
+            applyPlanFields(from: next)
             skillStore.persist(next.skills)
-            await refreshCuaTargetSurface()
+            if refreshTargetSurface {
+                await refreshCuaTargetSurface()
+            } else if next.currentTask == nil {
+                cuaTargetSurface = .empty
+            }
             await refreshEventHistory()
             lastError = nil
         } catch {
@@ -548,6 +801,12 @@ final class AppStateStore: ObservableObject {
                 statusMessage: error.localizedDescription,
                 currentSession: snapshot.currentSession,
                 sopCapture: snapshot.sopCapture,
+                highlightSegment: snapshot.highlightSegment,
+                frontmostContext: snapshot.frontmostContext,
+                followUpPackage: snapshot.followUpPackage,
+                mailDraftInsertResult: snapshot.mailDraftInsertResult,
+                workerStatuses: snapshot.workerStatuses,
+                memoryContextChunks: snapshot.memoryContextChunks,
                 currentTask: snapshot.currentTask,
                 skills: snapshot.skills,
                 services: snapshot.services
@@ -599,6 +858,34 @@ final class AppStateStore: ObservableObject {
             status: service.status,
             detail: service.detail,
             config: aiManusConfig
+        )
+    }
+
+    private func applyServiceStatus(_ service: ServiceStatus) {
+        if let index = snapshot.services.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(service.name) == .orderedSame }) {
+            snapshot.services[index] = service
+        } else {
+            snapshot.services.append(service)
+        }
+    }
+
+    private func applyPlanStatus(_ status: PlanStatus) {
+        snapshot.highlightSegment = status.highlightSegment
+        snapshot.frontmostContext = status.frontmostContext
+        snapshot.followUpPackage = status.followUpPackage
+        snapshot.mailDraftInsertResult = status.mailDraftInsertResult
+        snapshot.workerStatuses = status.workerStatuses
+        snapshot.memoryContextChunks = status.memoryContextChunks
+    }
+
+    private func applyPlanFields(from snapshot: AppSnapshot) {
+        planStatus = PlanStatus(
+            highlightSegment: snapshot.highlightSegment,
+            frontmostContext: snapshot.frontmostContext,
+            followUpPackage: snapshot.followUpPackage,
+            mailDraftInsertResult: snapshot.mailDraftInsertResult,
+            workerStatuses: snapshot.workerStatuses ?? [],
+            memoryContextChunks: snapshot.memoryContextChunks ?? []
         )
     }
 

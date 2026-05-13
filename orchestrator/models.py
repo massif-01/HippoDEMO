@@ -110,6 +110,71 @@ class SopCapture(BaseModel):
     error: Optional[str] = None
 
 
+class MemoryContextChunk(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("chunk"))
+    session_id: Optional[str] = None
+    source: str
+    start_at: str
+    end_at: str
+    content: str
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created_at: str = Field(default_factory=now_iso)
+
+
+class ForegroundAXSnapshot(BaseModel):
+    bundle_id: Optional[str] = None
+    app_name: Optional[str] = None
+    window_title: Optional[str] = None
+    focused_element: Optional[str] = None
+    visible_text: str = ""
+    tree_markdown: str = ""
+    editable_fields: List[Dict[str, Any]] = Field(default_factory=list)
+    target_surface: Optional[CuaTargetSurface] = None
+    captured_at: str = Field(default_factory=now_iso)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HighlightSegment(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("highlight"))
+    check_in: Optional[str] = None
+    check_out: Optional[str] = None
+    status: str = "idle"
+    source_session_id: Optional[str] = None
+    context_priority: Optional[str] = None
+    generated_skill_id: Optional[str] = None
+    context_chunk_ids: List[str] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class FollowUpPackage(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("followup"))
+    subject: str
+    body: str
+    minutes_path: Optional[str] = None
+    context_priority: str = "none"
+    source_session_id: Optional[str] = None
+    context_chunk_ids: List[str] = Field(default_factory=list)
+    created_at: str = Field(default_factory=now_iso)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class MailDraftInsertResult(BaseModel):
+    ok: bool = False
+    detail: str = ""
+    target_surface: Optional[CuaTargetSurface] = None
+    inserted_at: str = Field(default_factory=now_iso)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PlanWorkerStatus(BaseModel):
+    name: str
+    status: str = "idle"
+    detail: Optional[str] = None
+    started_at: Optional[str] = None
+    updated_at: str = Field(default_factory=now_iso)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class DemoSession(BaseModel):
     id: str = Field(default_factory=lambda: new_id("session"))
     title: str = "Investor meeting"
@@ -146,6 +211,12 @@ class OrchestratorState(BaseModel):
     jarvis_state: JarvisState = JarvisState.IDLE
     current_session: Optional[DemoSession] = None
     sop_capture: SopCapture = Field(default_factory=SopCapture)
+    highlight_segment: Optional[HighlightSegment] = None
+    frontmost_context: Optional[ForegroundAXSnapshot] = None
+    follow_up_package: Optional[FollowUpPackage] = None
+    mail_draft_insert_result: Optional[MailDraftInsertResult] = None
+    worker_statuses: List[PlanWorkerStatus] = Field(default_factory=list)
+    memory_context_chunks: List[MemoryContextChunk] = Field(default_factory=list)
     active_tasks: List[ActiveTask] = Field(default_factory=list)
     skills: List[SkillRecord] = Field(default_factory=list)
     services: List[ServiceStatus] = Field(default_factory=list)
@@ -183,6 +254,49 @@ class OwnscribeConfigRequest(BaseModel):
     summary_model: Optional[str] = None
     summary_api_key: Optional[str] = None
     api_key: Optional[str] = None
+
+
+class OpenChronicleModelConfigRequest(BaseModel):
+    stage: str = "default"
+    model: Optional[str] = None
+    base_url: Optional[str] = None
+    api_key_env: Optional[str] = None
+    api_key: Optional[str] = None
+    max_tokens: Optional[int] = None
+
+
+class VlmacConfigRequest(BaseModel):
+    service_base_url: Optional[str] = None
+    vllm_base_url: Optional[str] = None
+    vllm_model: Optional[str] = None
+    vllm_api_key: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    timeout_seconds: Optional[float] = None
+
+
+class BasicMemoryEmbeddingConfigRequest(BaseModel):
+    semantic_search_enabled: Optional[bool] = None
+    semantic_embedding_provider: Optional[str] = None
+    semantic_embedding_model: Optional[str] = None
+    semantic_embedding_base_url: Optional[str] = None
+    semantic_embedding_api_key: Optional[str] = None
+    semantic_embedding_api_key_env: Optional[str] = None
+    semantic_embedding_dimensions: Optional[int] = None
+    semantic_embedding_batch_size: Optional[int] = None
+    semantic_embedding_request_concurrency: Optional[int] = None
+    semantic_embedding_timeout: Optional[float] = None
+
+
+class ProjectCortexConfigRequest(BaseModel):
+    use_real: Optional[bool] = None
+    service_base_url: Optional[str] = None
+    openai_base_url: Optional[str] = None
+    openai_model: Optional[str] = None
+    openai_api_key: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    timeout_seconds: Optional[float] = None
 
 
 class AiManusConfigRequest(BaseModel):

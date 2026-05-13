@@ -22,6 +22,7 @@ from ..models import ServiceStatus, now_iso
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 OWNSCRIBE_DIR = PROJECT_DIR / "ownscribe"
 OWNSCRIBE_SRC = OWNSCRIBE_DIR / "src"
+RUNTIME_PYTHON = PROJECT_DIR / ".runtime" / "python" / "bin" / "python"
 DATA_DIR = PROJECT_DIR / "orchestrator" / "data" / "ownscribe"
 CONFIG_PATH = PROJECT_DIR / "orchestrator" / "data" / "ownscribe_config.json"
 PROVIDER_CONFIG_PATH = PROJECT_DIR / ".runtime" / "ownscribe-provider.json"
@@ -1209,6 +1210,8 @@ class OwnscribeAdapter:
         override = os.environ.get("OWNSCRIBE_PYTHON")
         if override:
             return override
+        if RUNTIME_PYTHON.exists():
+            return str(RUNTIME_PYTHON)
         local_python = OWNSCRIBE_DIR / ".venv" / "bin" / "python"
         if local_python.exists():
             return str(local_python)

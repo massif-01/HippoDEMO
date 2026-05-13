@@ -14,9 +14,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from .adapters.openchronicle import openchronicle_adapter
+from .adapters.basic_memory import basic_memory_adapter
 from .adapters.cua_driver import cua_driver_adapter
+from .adapters.vlmac import vlmac_adapter
 from .adapters.ai_manus import AiManusAuthRequired, ai_manus_adapter
 from .adapters.project_cortex import sop_adapter
+from .plan_runtime import plan_runtime
 try:
     from .adapters.ownscribe import ownscribe_adapter
 except ImportError:
@@ -35,16 +38,26 @@ from .models import (
     AiManusThreadEvent,
     AiManusThreadMessage,
     Artifact,
+    BasicMemoryEmbeddingConfigRequest,
     CaptureFinishRequest,
     CaptureStatus,
     CuaTargetSurface,
     DemoSession,
+    FollowUpPackage,
+    ForegroundAXSnapshot,
+    HighlightSegment,
     JarvisState,
+    MailDraftInsertResult,
+    MemoryContextChunk,
+    OpenChronicleModelConfigRequest,
     OwnscribeConfigRequest,
+    PlanWorkerStatus,
+    ProjectCortexConfigRequest,
     ProposedAction,
     ServiceStatus,
     SkillGenerateRequest,
     SkillRecord,
+    VlmacConfigRequest,
     new_id,
     now_iso,
 )
@@ -65,10 +78,14 @@ OPENCHRONICLE_STATUS_TTL_SECONDS = 10.0
 OWNSCRIBE_STATUS_TTL_SECONDS = 10.0
 CUA_STATUS_TTL_SECONDS = 10.0
 AI_MANUS_STATUS_TTL_SECONDS = 10.0
+BASIC_MEMORY_STATUS_TTL_SECONDS = 10.0
+VLMAC_STATUS_TTL_SECONDS = 10.0
 _openchronicle_status_checked_at = 0.0
 _ownscribe_status_checked_at = 0.0
 _cua_status_checked_at = 0.0
 _ai_manus_status_checked_at = 0.0
+_basic_memory_status_checked_at = 0.0
+_vlmac_status_checked_at = 0.0
 
 
 def _float_env(name: str, default: float) -> float:
@@ -149,6 +166,178 @@ def _service_payload(service: ServiceStatus) -> dict:
         "status": service.status,
         "detail": service.detail,
     }
+
+
+def _model_payload(model: Any) -> dict[str, Any] | None:
+    if model is None:
+        return None
+    return to_dict(model)
+
+
+def _parse_iso(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _chunk_overlaps(chunk: MemoryContextChunk, *, start_at: str | None, end_at: str | None) -> bool:
+    start = _parse_iso(start_at)
+    end = _parse_iso(end_at)
+    chunk_start = _parse_iso(chunk.start_at)
+    chunk_end = _parse_iso(chunk.end_at)
+    if not start or not end or not chunk_start or not chunk_end:
+        return True
+    return chunk_start <= end and chunk_end >= start
+
+
+def _memory_chunks_for_window(
+    *,
+    session_id: str | None,
+    start_at: str | None,
+    end_at: str | None,
+) -> list[MemoryContextChunk]:
+    chunks = [
+        chunk
+        for chunk in store.state.memory_context_chunks
+        if (not session_id or chunk.session_id == session_id)
+        and _chunk_overlaps(chunk, start_at=start_at, end_at=end_at)
+    ]
+    known_ids = {chunk.id for chunk in chunks}
+    for item in basic_memory_adapter.search_window(
+        session_id=session_id,
+        start_at=start_at,
+        end_at=end_at,
+        limit=50,
+    ):
+        try:
+            chunk = MemoryContextChunk.model_validate(item)
+        except Exception:
+            continue
+        if chunk.id in known_ids:
+            continue
+        chunks.append(chunk)
+        known_ids.add(chunk.id)
+    return sorted(chunks, key=lambda item: item.start_at)
+
+
+def _context_priority(chunks: list[MemoryContextChunk]) -> str:
+    sources = {chunk.source for chunk in chunks}
+    if "video_context" in sources:
+        return "video_context"
+    if "audio_context" in sources:
+        return "audio_context"
+    if sources:
+        return sorted(sources)[0]
+    return "none"
+
+
+def _context_summary(chunks: list[MemoryContextChunk], *, limit: int = 6) -> str:
+    lines = []
+    for chunk in chunks[:limit]:
+        content = chunk.content.strip().replace("\n", " ")
+        if len(content) > 320:
+            content = content[:317].rstrip() + "..."
+        lines.append(f"- [{chunk.source}] {chunk.start_at} -> {chunk.end_at}: {content}")
+    if len(chunks) > limit:
+        lines.append(f"- ... {len(chunks) - limit} more context chunk(s)")
+    return "\n".join(lines)
+
+
+def _worker_status_from_payload(payload: dict[str, Any]) -> PlanWorkerStatus:
+    return PlanWorkerStatus(
+        name=str(payload.get("name") or "worker"),
+        status=str(payload.get("status") or "unknown"),
+        detail=payload.get("detail"),
+        started_at=payload.get("started_at"),
+        updated_at=str(payload.get("updated_at") or now_iso()),
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+    )
+
+
+def _apply_worker_status_payloads(payloads: list[Any]) -> None:
+    statuses = [
+        _worker_status_from_payload(payload)
+        for payload in payloads
+        if isinstance(payload, dict)
+    ]
+    if not statuses:
+        return
+    for status in statuses:
+        replaced = False
+        for index, existing in enumerate(store.state.worker_statuses):
+            if existing.name.lower() == status.name.lower():
+                store.state.worker_statuses[index] = status
+                replaced = True
+                break
+        if not replaced:
+            store.state.worker_statuses.append(status)
+        _set_service_status(ServiceStatus(name=status.name, status=status.status, detail=status.detail))
+
+
+def _runtime_snapshot_to_store(snapshot: dict[str, Any]) -> None:
+    workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
+    _apply_worker_status_payloads(workers)
+
+
+def _runtime_chunk_from_payload(payload: dict[str, Any]) -> MemoryContextChunk:
+    return MemoryContextChunk(
+        id=str(payload.get("id") or new_id("chunk")),
+        session_id=payload.get("session_id") or (store.state.current_session.id if store.state.current_session else None),
+        source=str(payload.get("source") or "memory_context"),
+        start_at=str(payload.get("start_at") or payload.get("created_at") or now_iso()),
+        end_at=str(payload.get("end_at") or payload.get("start_at") or payload.get("created_at") or now_iso()),
+        content=str(payload.get("content") or ""),
+        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
+        created_at=str(payload.get("created_at") or now_iso()),
+    )
+
+
+def _runtime_frontmost_from_payload(payload: dict[str, Any]) -> ForegroundAXSnapshot:
+    editable_fields = payload.get("editable_fields") if isinstance(payload.get("editable_fields"), list) else []
+    metadata = {
+        "source": "plan_runtime",
+        "status": payload.get("status"),
+        "mode": payload.get("mode"),
+        "reason": payload.get("reason"),
+        "signals": payload.get("signals") if isinstance(payload.get("signals"), list) else [],
+        "session_id": payload.get("session_id"),
+    }
+    return ForegroundAXSnapshot(
+        bundle_id=payload.get("bundle_id"),
+        app_name=payload.get("app_name"),
+        window_title=payload.get("window_title"),
+        focused_element=payload.get("focused_element"),
+        visible_text=str(payload.get("visible_text") or ""),
+        tree_markdown=str(payload.get("tree_markdown") or ""),
+        editable_fields=editable_fields,
+        target_surface=None,
+        captured_at=str(payload.get("created_at") or now_iso()),
+        metadata=metadata,
+    )
+
+
+async def _plan_runtime_event_sink(event_type: str, payload: dict[str, Any]) -> None:
+    session_id = payload.get("session_id")
+    if not session_id and store.state.current_session:
+        session_id = store.state.current_session.id
+    async with store._lock:
+        if event_type in {"memory_context_queued", "video_context_ready"}:
+            chunk = _runtime_chunk_from_payload(payload)
+            await store.add_memory_context_chunk(chunk)
+        elif event_type == "ax_snapshot":
+            store.state.frontmost_context = _runtime_frontmost_from_payload(payload)
+            await store.persist()
+        elif event_type in {"plan_runtime_started", "plan_runtime_stopped"}:
+            workers = payload.get("workers") if isinstance(payload.get("workers"), list) else []
+            _apply_worker_status_payloads(workers)
+            await store.persist()
+        await store.publish(event_type, payload, session_id=session_id)
+
+
+plan_runtime.event_sink = _plan_runtime_event_sink
 
 
 def _ai_manus_session_id(payload: Any) -> str | None:
@@ -487,6 +676,44 @@ async def _refresh_ai_manus_status() -> ServiceStatus:
         return service
 
 
+async def _refresh_basic_memory_status() -> ServiceStatus:
+    global _basic_memory_status_checked_at
+
+    now = time.monotonic()
+    current = next(
+        (service for service in store.state.services if service.name.lower() == "basic-memory"),
+        None,
+    )
+    if current and now - _basic_memory_status_checked_at < BASIC_MEMORY_STATUS_TTL_SECONDS:
+        return current
+
+    service = basic_memory_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+        _basic_memory_status_checked_at = time.monotonic()
+        return service
+
+
+async def _refresh_vlmac_status() -> ServiceStatus:
+    global _vlmac_status_checked_at
+
+    now = time.monotonic()
+    current = next(
+        (service for service in store.state.services if service.name.lower() == "vlmac"),
+        None,
+    )
+    if current and now - _vlmac_status_checked_at < VLMAC_STATUS_TTL_SECONDS:
+        return current
+
+    service = await vlmac_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+        _vlmac_status_checked_at = time.monotonic()
+        return service
+
+
 async def _apply_openchronicle_status(service: ServiceStatus) -> None:
     global _openchronicle_status_checked_at
 
@@ -517,6 +744,22 @@ async def _apply_ai_manus_status(service: ServiceStatus) -> None:
     _set_service_status(service)
     await store.persist()
     _ai_manus_status_checked_at = time.monotonic()
+
+
+async def _apply_basic_memory_status(service: ServiceStatus) -> None:
+    global _basic_memory_status_checked_at
+
+    _set_service_status(service)
+    await store.persist()
+    _basic_memory_status_checked_at = time.monotonic()
+
+
+async def _apply_vlmac_status(service: ServiceStatus) -> None:
+    global _vlmac_status_checked_at
+
+    _set_service_status(service)
+    await store.persist()
+    _vlmac_status_checked_at = time.monotonic()
 
 
 def _sop_state() -> str:
@@ -591,6 +834,12 @@ def state_payload():
             "check_out": store.state.sop_capture.check_out,
             "state": _sop_state(),
         },
+        "highlight_segment": _model_payload(store.state.highlight_segment),
+        "frontmost_context": _model_payload(store.state.frontmost_context),
+        "follow_up_package": _model_payload(store.state.follow_up_package),
+        "mail_draft_insert_result": _model_payload(store.state.mail_draft_insert_result),
+        "worker_statuses": [to_dict(status) for status in store.state.worker_statuses],
+        "memory_context_chunks": [to_dict(chunk) for chunk in store.state.memory_context_chunks[-20:]],
         "current_task": _task_payload(current_task) if current_task else None,
         "skills": [_skill_payload(skill) for skill in store.state.skills],
         "services": [_service_payload(service) for service in store.state.services],
@@ -847,9 +1096,12 @@ def _artifact_by_id(task: ActiveTask, artifact_id: str | None) -> Artifact | Non
 
 def _insert_action_and_text(task: ActiveTask) -> tuple[ProposedAction | None, str | None]:
     for action in task.proposed_actions:
-        if action.payload.get("mode") != "insert_draft":
+        if action.payload.get("mode") not in {"insert_draft", "insert_mail_draft"}:
             continue
-        artifact = _artifact_by_id(task, action.payload.get("artifact_id"))
+        artifact = _artifact_by_id(
+            task,
+            action.payload.get("artifact_id") or action.payload.get("body_artifact_id"),
+        )
         if artifact and artifact.content and artifact.content.strip():
             return action, artifact.content.strip()
         return action, None
@@ -875,6 +1127,59 @@ def _cua_result_payload(result) -> dict[str, Any]:
         "target_bundle_id": result.target_bundle_id,
         "text_chars": result.text_chars,
     }
+
+
+def _snapshot_from_surface(surface: CuaTargetSurface) -> ForegroundAXSnapshot:
+    editable_fields = []
+    if surface.element_index is not None:
+        editable_fields.append(
+            {
+                "index": surface.element_index,
+                "role": surface.element_role,
+                "mode": surface.mode,
+            }
+        )
+    return ForegroundAXSnapshot(
+        bundle_id=surface.bundle_id,
+        app_name=surface.app_name,
+        window_title=surface.window_title,
+        focused_element=surface.element_role,
+        visible_text=surface.window_title or "",
+        tree_markdown="",
+        editable_fields=editable_fields,
+        target_surface=surface,
+        metadata={"source": "cua_target_surface", "status": surface.status, "reason": surface.reason},
+    )
+
+
+def _wechat_intent_from_snapshot(snapshot: ForegroundAXSnapshot) -> dict[str, Any] | None:
+    text = "\n".join(
+        item
+        for item in [snapshot.visible_text, snapshot.tree_markdown, snapshot.window_title or ""]
+        if item
+    ).lower()
+    if snapshot.bundle_id not in {"com.tencent.xinWeChat", "com.tencent.WeWorkMac"} and "微信" not in text and "wechat" not in text:
+        return None
+    keywords = ["会议纪要", "发邮件", "邮件", "follow up", "follow-up", "send email", "meeting notes"]
+    matched = [keyword for keyword in keywords if keyword.lower() in text]
+    if not matched:
+        return None
+    return {
+        "type": "wechat_intent",
+        "matched": matched,
+        "bundle_id": snapshot.bundle_id,
+        "window_title": snapshot.window_title,
+        "captured_at": snapshot.captured_at,
+    }
+
+
+def _mail_compose_ready_from_snapshot(snapshot: ForegroundAXSnapshot) -> bool:
+    if snapshot.bundle_id not in {"com.apple.mail", "com.microsoft.Outlook"}:
+        return False
+    title = (snapshot.window_title or "").lower()
+    if any(marker in title for marker in ["new message", "compose", "新邮件", "撰写"]):
+        return True
+    return bool(snapshot.editable_fields)
 
 
 def _target_surface_payload(surface: CuaTargetSurface) -> dict[str, Any]:
@@ -906,6 +1211,8 @@ async def generate_skill_record(
         name=name,
         description=description,
     )
+    sop_config = sop_adapter.config()
+    model_configured = bool(sop_config.get("openai_base_url") and sop_config.get("openai_model"))
     skill_id = new_id("skill")
     path = SKILL_DIR / f"{skill_id}.md"
     skill = SkillRecord(
@@ -916,7 +1223,11 @@ async def generate_skill_record(
         source_session_id=source_session_id,
         check_in=check_in,
         check_out=check_out,
-        metadata={"adapter": "Project_Cortex", "mock": not sop_adapter.use_real},
+        metadata={
+            "adapter": "Project_Cortex",
+            "mock": not sop_adapter.use_real and not model_configured,
+            "generation_mode": "project_cortex_service" if sop_adapter.use_real else ("openai_compatible" if model_configured else "mock"),
+        },
     )
     await store.add_skill(skill, result.mdfile)
     await store.publish("skill_generated", to_dict(skill), session_id=source_session_id)
@@ -932,9 +1243,23 @@ async def health() -> ServiceStatus:
 async def get_state():
     await _refresh_openchronicle_status()
     await _refresh_ownscribe_status()
+    await _refresh_basic_memory_status()
+    await _refresh_vlmac_status()
     await _refresh_cua_status()
     await _refresh_ai_manus_status()
     return state_payload()
+
+
+@app.get("/plan")
+async def plan_status():
+    return {
+        "highlight_segment": _model_payload(store.state.highlight_segment),
+        "frontmost_context": _model_payload(store.state.frontmost_context),
+        "follow_up_package": _model_payload(store.state.follow_up_package),
+        "mail_draft_insert_result": _model_payload(store.state.mail_draft_insert_result),
+        "worker_statuses": [to_dict(status) for status in store.state.worker_statuses],
+        "memory_context_chunks": [to_dict(chunk) for chunk in store.state.memory_context_chunks[-20:]],
+    }
 
 
 @app.get("/events/history")
@@ -978,14 +1303,17 @@ async def jarvis_on():
         ("start_recording", "start", "record"),
         session_id=session.id,
     )
+    runtime_snapshot = await plan_runtime.start(session.id)
     ownscribe_ok = ownscribe_service.status not in {"error", "unavailable"}
     session.metadata["ownscribe"] = _payload_from_result(ownscribe_result)
+    session.metadata["plan_runtime"] = runtime_snapshot
     if not ownscribe_ok:
         session.metadata["mode"] = "adapter-first-with-ownscribe-fallback"
     async with store._lock:
         store.state.current_session = session
         store.state.jarvis_state = JarvisState.MEETING_ACTIVE
         store.state.sop_capture.status = CaptureStatus.IDLE
+        _runtime_snapshot_to_store(runtime_snapshot)
         await _apply_openchronicle_status(openchronicle_service)
         await _apply_ownscribe_status(ownscribe_service)
         await store.persist()
@@ -1007,9 +1335,8 @@ async def jarvis_off():
     if not store.state.current_session:
         raise HTTPException(status_code=409, detail="No active session to stop.")
     session_id = store.state.current_session.id
-    openchronicle_service = await openchronicle_adapter.capture_once()
-    if openchronicle_service.status == "error":
-        openchronicle_service = await openchronicle_adapter.timeline_tick()
+    openchronicle_service = await openchronicle_adapter.stop()
+    runtime_snapshot = await plan_runtime.stop(session_id)
     ownscribe_result, ownscribe_service = await _call_ownscribe(
         ("stop_recording", "stop", "finish", "finalize"),
         session_id=session_id,
@@ -1017,13 +1344,13 @@ async def jarvis_off():
         terminate_timeout=5.0,
         kill_timeout=2.0,
     )
-    surface = await cua_driver_adapter.target_surface()
     async with store._lock:
         session = store.state.current_session
         if not session:
             raise HTTPException(status_code=409, detail="No active session to stop.")
         session.ended_at = now_iso()
         session.state = JarvisState.ACTIVE_TASK_CANDIDATE
+        session.metadata["plan_runtime"] = runtime_snapshot
         artifacts = ownscribe_artifacts(ownscribe_result, session)
         ownscribe_ok = ownscribe_service.status not in {"error", "unavailable"} and bool(artifacts)
         if not ownscribe_ok:
@@ -1039,12 +1366,12 @@ async def jarvis_off():
             persisted_artifacts.append(await store.add_artifact(artifact, session=session))
             await store.publish("artifact_ready", to_dict(artifact), session_id=session.id)
         task = build_active_task(session, persisted_artifacts)
-        _sync_task_target_surface(task, surface)
         await store.add_active_task(task)
         store.state.jarvis_state = JarvisState.INTERVENTION_READY
         session.state = JarvisState.INTERVENTION_READY
         await _apply_openchronicle_status(openchronicle_service)
         await _apply_ownscribe_status(ownscribe_service)
+        _runtime_snapshot_to_store(runtime_snapshot)
         await store.persist()
         await store.publish(
             "ownscribe_recording_stopped" if ownscribe_ok else "ownscribe_recording_failed",
@@ -1053,6 +1380,7 @@ async def jarvis_off():
                 "service": to_dict(ownscribe_service),
                 "artifact_count": len(persisted_artifacts),
                 "fallback": not ownscribe_ok,
+                "target_surface": "deferred_until_user_detection_or_insert",
             },
             session_id=session.id,
         )
@@ -1067,10 +1395,10 @@ async def jarvis_off():
             )
         await store.publish("active_task_generated", to_dict(task), session_id=session.id)
         await store.publish(
-            "intervention_signal_detected" if surface.safe else "intervention_signal_waiting",
+            "intervention_signal_waiting",
             {
                 "task_id": task.id,
-                "target_surface": _target_surface_payload(surface),
+                "reason": "target_surface_deferred_until_user_detection_or_insert",
             },
             session_id=session.id,
         )
@@ -1146,6 +1474,180 @@ async def openchronicle_rebuild_captures_index():
 @app.post("/integrations/openchronicle/timeline-tick")
 async def openchronicle_timeline_tick():
     return await _openchronicle_command_snapshot("timeline-tick", openchronicle_adapter.timeline_tick)
+
+
+@app.get("/integrations/openchronicle/model-config")
+async def openchronicle_model_config(stage: str = "default"):
+    try:
+        return openchronicle_adapter.model_config(stage)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.post("/integrations/openchronicle/model-config")
+async def openchronicle_update_model_config(request: OpenChronicleModelConfigRequest):
+    try:
+        config = openchronicle_adapter.update_model_config(
+            stage=request.stage,
+            model=request.model,
+            base_url=request.base_url,
+            api_key_env=request.api_key_env,
+            api_key=request.api_key,
+            max_tokens=request.max_tokens,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    async with store._lock:
+        await store.publish(
+            "openchronicle_model_config_updated",
+            {
+                "stage": config.get("stage"),
+                "model": config.get("model"),
+                "base_url": config.get("base_url"),
+                "api_key_configured": config.get("api_key_configured"),
+                "restart_required": config.get("restart_required"),
+            },
+        )
+    return config
+
+
+@app.get("/integrations/vlmac/status")
+async def vlmac_status():
+    service = await vlmac_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+    return to_dict(service)
+
+
+@app.get("/integrations/vlmac/config")
+async def vlmac_config():
+    return vlmac_adapter.config()
+
+
+@app.post("/integrations/vlmac/config")
+async def vlmac_update_config(request: VlmacConfigRequest):
+    try:
+        config = vlmac_adapter.update_config(
+            service_base_url=request.service_base_url,
+            vllm_base_url=request.vllm_base_url,
+            vllm_model=request.vllm_model,
+            vllm_api_key=request.vllm_api_key,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            timeout_seconds=request.timeout_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    service = await vlmac_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+        await store.publish(
+            "vlmac_config_updated",
+            {
+                "service_base_url": config.get("service_base_url"),
+                "vllm_base_url": config.get("vllm_base_url"),
+                "vllm_model": config.get("vllm_model"),
+                "api_key_configured": config.get("vllm_api_key_configured"),
+                "restart_required": config.get("restart_required"),
+            },
+        )
+    return config
+
+
+@app.get("/integrations/basic-memory/status")
+async def basic_memory_status():
+    service = basic_memory_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+    return to_dict(service)
+
+
+@app.get("/integrations/basic-memory/embedding-config")
+async def basic_memory_embedding_config():
+    return basic_memory_adapter.config()
+
+
+@app.post("/integrations/basic-memory/embedding-config")
+async def basic_memory_update_embedding_config(request: BasicMemoryEmbeddingConfigRequest):
+    try:
+        config = basic_memory_adapter.update_embedding_config(
+            semantic_search_enabled=request.semantic_search_enabled,
+            semantic_embedding_provider=request.semantic_embedding_provider,
+            semantic_embedding_model=request.semantic_embedding_model,
+            semantic_embedding_base_url=request.semantic_embedding_base_url,
+            semantic_embedding_api_key=request.semantic_embedding_api_key,
+            semantic_embedding_api_key_env=request.semantic_embedding_api_key_env,
+            semantic_embedding_dimensions=request.semantic_embedding_dimensions,
+            semantic_embedding_batch_size=request.semantic_embedding_batch_size,
+            semantic_embedding_request_concurrency=request.semantic_embedding_request_concurrency,
+            semantic_embedding_timeout=request.semantic_embedding_timeout,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    service = basic_memory_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+        await store.publish(
+            "basic_memory_embedding_config_updated",
+            {
+                "provider": config.get("semantic_embedding_provider"),
+                "model": config.get("semantic_embedding_model"),
+                "base_url": config.get("semantic_embedding_base_url"),
+                "api_key_configured": config.get("semantic_embedding_api_key_configured"),
+                "restart_required": config.get("restart_required"),
+            },
+        )
+    return config
+
+
+@app.get("/integrations/project-cortex/status")
+async def project_cortex_status():
+    service = await sop_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+    return to_dict(service)
+
+
+@app.get("/integrations/project-cortex/config")
+async def project_cortex_config():
+    return sop_adapter.config()
+
+
+@app.post("/integrations/project-cortex/config")
+async def project_cortex_update_config(request: ProjectCortexConfigRequest):
+    try:
+        config = sop_adapter.update_config(
+            use_real=request.use_real,
+            service_base_url=request.service_base_url,
+            openai_base_url=request.openai_base_url,
+            openai_model=request.openai_model,
+            openai_api_key=request.openai_api_key,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+            timeout_seconds=request.timeout_seconds,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    service = await sop_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+        await store.publish(
+            "project_cortex_config_updated",
+            {
+                "use_real": config.get("use_real"),
+                "service_base_url": config.get("service_base_url"),
+                "openai_base_url": config.get("openai_base_url"),
+                "openai_model": config.get("openai_model"),
+                "api_key_configured": config.get("openai_api_key_configured"),
+            },
+        )
+    return config
 
 
 def _require_ownscribe_adapter():
@@ -1727,12 +2229,22 @@ async def cua_target_surface():
 @app.post("/intervention/detect")
 async def intervention_detect():
     surface = await cua_driver_adapter.target_surface()
+    snapshot = _snapshot_from_surface(surface)
+    wechat_intent = _wechat_intent_from_snapshot(snapshot)
+    mail_ready = _mail_compose_ready_from_snapshot(snapshot)
     async with store._lock:
+        store.state.frontmost_context = snapshot
         task = _current_task()
         if not task:
             await store.publish(
                 "intervention_signal_idle",
-                {"target_surface": _target_surface_payload(surface), "reason": "no_active_task"},
+                {
+                    "target_surface": _target_surface_payload(surface),
+                    "frontmost_context": to_dict(snapshot),
+                    "wechat_intent": wechat_intent,
+                    "mail_compose_ready": mail_ready,
+                    "reason": "no_active_task",
+                },
             )
             return state_payload()
 
@@ -1745,10 +2257,135 @@ async def intervention_detect():
             {
                 "task_id": task.id,
                 "target_surface": _target_surface_payload(surface),
+                "frontmost_context": to_dict(snapshot),
+                "wechat_intent": wechat_intent,
+                "mail_compose_ready": mail_ready,
             },
             session_id=task.source_session_id,
         )
+        if wechat_intent:
+            await store.publish("wechat_intent_detected", wechat_intent, session_id=task.source_session_id)
+        if mail_ready:
+            await store.publish(
+                "mail_compose_detected",
+                {"target_surface": _target_surface_payload(surface), "frontmost_context": to_dict(snapshot)},
+                session_id=task.source_session_id,
+            )
         return state_payload()
+
+
+@app.get("/context/frontmost", response_model=ForegroundAXSnapshot)
+async def frontmost_context():
+    surface = await cua_driver_adapter.target_surface()
+    snapshot = _snapshot_from_surface(surface)
+    async with store._lock:
+        await store.set_frontmost_context(snapshot)
+        await store.publish("frontmost_context_captured", to_dict(snapshot), session_id=snapshot.metadata.get("session_id"))
+    return snapshot
+
+
+@app.get("/frontmost", response_model=ForegroundAXSnapshot)
+async def frontmost_context_alias():
+    return await frontmost_context()
+
+
+@app.post("/highlight/start")
+async def highlight_start():
+    async with store._lock:
+        if store.state.highlight_segment and store.state.highlight_segment.status in {"capturing", "generating"}:
+            raise HTTPException(status_code=409, detail="Highlight is already active.")
+        session_id = store.state.current_session.id if store.state.current_session else None
+        check_in = now_iso()
+        segment = HighlightSegment(
+            check_in=check_in,
+            status="capturing",
+            source_session_id=session_id,
+        )
+        store.state.highlight_segment = segment
+        store.state.sop_capture.status = CaptureStatus.CAPTURING
+        store.state.sop_capture.check_in = check_in
+        store.state.sop_capture.check_out = None
+        store.state.sop_capture.source_session_id = session_id
+        store.state.sop_capture.generated_skill_id = None
+        store.state.sop_capture.error = None
+        await store.persist()
+        await store.publish("highlight_started", to_dict(segment), session_id=session_id)
+        return state_payload()
+
+
+@app.post("/highlight/finish")
+async def highlight_finish(request: CaptureFinishRequest | None = None):
+    async with store._lock:
+        segment = store.state.highlight_segment
+        if not segment or segment.status != "capturing":
+            raise HTTPException(status_code=409, detail="No active Highlight to finish.")
+        segment.status = "generating"
+        segment.check_out = request.check_out if request and request.check_out else now_iso()
+        store.state.sop_capture.status = CaptureStatus.GENERATING
+        store.state.sop_capture.check_out = segment.check_out
+        await store.persist()
+        await store.publish("highlight_generating", to_dict(segment), session_id=segment.source_session_id)
+
+    chunks = _memory_chunks_for_window(
+        session_id=segment.source_session_id,
+        start_at=segment.check_in,
+        end_at=segment.check_out,
+    )
+    priority = _context_priority(chunks)
+    if priority == "none":
+        async with store._lock:
+            segment.status = "failed"
+            segment.error = "No video_context or audio_context found in Highlight window."
+            store.state.sop_capture.status = CaptureStatus.FAILED
+            store.state.sop_capture.error = segment.error
+            await store.persist()
+            await store.publish("highlight_failed", to_dict(segment), session_id=segment.source_session_id)
+        raise HTTPException(status_code=409, detail=segment.error)
+
+    try:
+        skill = await generate_skill_record(
+            check_in=segment.check_in,
+            check_out=segment.check_out,
+            source_session_id=segment.source_session_id,
+            description=f"Generated from {priority} context in Highlight window.",
+        )
+    except Exception as exc:
+        async with store._lock:
+            segment.status = "failed"
+            segment.error = str(exc)
+            store.state.sop_capture.status = CaptureStatus.FAILED
+            store.state.sop_capture.error = str(exc)
+            await store.persist()
+            await store.publish("highlight_failed", to_dict(segment), session_id=segment.source_session_id)
+        raise HTTPException(status_code=502, detail=f"Highlight generation failed: {exc}") from exc
+
+    async with store._lock:
+        segment.status = "completed"
+        segment.context_priority = priority
+        segment.context_chunk_ids = [chunk.id for chunk in chunks]
+        segment.generated_skill_id = skill.id
+        skill.metadata.update(
+            {
+                "source": "highlight",
+                "context_priority": priority,
+                "context_chunk_ids": segment.context_chunk_ids,
+                "context_summary": _context_summary(chunks),
+            }
+        )
+        store.state.sop_capture.status = CaptureStatus.COMPLETED
+        store.state.sop_capture.generated_skill_id = skill.id
+        store.state.sop_capture.error = None
+        await store.persist()
+        await store.publish("highlight_finished", to_dict(segment), session_id=segment.source_session_id)
+        return state_payload()
+
+
+@app.post("/highlight")
+async def highlight_toggle():
+    segment = store.state.highlight_segment
+    if segment and segment.status == "capturing":
+        return await highlight_finish()
+    return await highlight_start()
 
 
 @app.post("/sop/capture-start")
@@ -1796,6 +2433,76 @@ async def capture_finish(request: CaptureFinishRequest | None = None):
             await store.persist()
             await store.publish("sop_capture_failed", to_dict(capture), session_id=capture.source_session_id)
             raise HTTPException(status_code=502, detail=f"SOP generation failed: {exc}") from exc
+
+
+@app.post("/follow-up/prepare", response_model=FollowUpPackage)
+async def follow_up_prepare():
+    async with store._lock:
+        session = store.state.current_session
+        if not session:
+            raise HTTPException(status_code=409, detail="No active session available for follow-up preparation.")
+        chunks = _memory_chunks_for_window(session_id=session.id, start_at=session.started_at, end_at=now_iso())
+        priority = _context_priority(chunks)
+        context = _context_summary(chunks, limit=10)
+        if not context:
+            context = "\n".join(
+                artifact.content or ""
+                for artifact in session.artifacts
+                if artifact.type in {"meeting_minutes", "meeting_transcript", "follow_up_body"}
+            ).strip()
+        if not context:
+            raise HTTPException(status_code=409, detail="No BasicMemory context or session artifacts available for follow-up.")
+
+        subject = f"Follow-up: {session.title}"
+        body = (
+            "Hi,\n\n"
+            "Thanks again for the conversation. I captured the main context below for review before sending.\n\n"
+            f"{context}\n\n"
+            "Best,\n"
+        )
+        minutes = Artifact(
+            type="meeting_minutes",
+            title="Follow-up context summary",
+            content=f"# Follow-up Context\n\n{context}\n",
+            metadata={
+                "source": "basic-memory" if chunks else "session_artifacts",
+                "context_priority": priority,
+            },
+        )
+        follow_up_artifact = Artifact(
+            type="follow_up_body",
+            title="Mail follow-up draft",
+            content=body,
+            metadata={
+                "source": "follow_up_package",
+                "subject": subject,
+                "context_priority": priority,
+            },
+        )
+        persisted_minutes = await store.add_artifact(minutes, session=session)
+        persisted_follow_up = await store.add_artifact(follow_up_artifact, session=session)
+        package = FollowUpPackage(
+            subject=subject,
+            body=body,
+            minutes_path=persisted_minutes.path,
+            context_priority=priority,
+            source_session_id=session.id,
+            context_chunk_ids=[chunk.id for chunk in chunks],
+            metadata={"artifact_ids": [persisted_minutes.id, persisted_follow_up.id]},
+        )
+        store.state.follow_up_package = package
+        task = build_active_task(session, [persisted_minutes, persisted_follow_up], target_type="mail")
+        await store.add_active_task(task)
+        store.state.jarvis_state = JarvisState.INTERVENTION_READY
+        await store.persist()
+        await store.publish("follow_up_prepared", to_dict(package), session_id=session.id)
+        await store.publish("active_task_generated", to_dict(task), session_id=session.id)
+        return package
+
+
+@app.post("/follow-up", response_model=FollowUpPackage)
+async def follow_up_prepare_alias():
+    return await follow_up_prepare()
 
 
 @app.post("/active-task/generate")
@@ -1894,6 +2601,91 @@ async def active_task_confirm(task_id: str):
         if not result.ok:
             raise HTTPException(status_code=502, detail=f"CUA insert failed: {result.detail}")
         return state_payload()
+
+
+@app.post("/active-task/{task_id}/insert-mail-draft", response_model=MailDraftInsertResult)
+async def active_task_insert_mail_draft(task_id: str):
+    async with store._lock:
+        try:
+            task = store.get_task(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Active Task not found.") from exc
+        insert_action, fallback_text = _insert_action_and_text(task)
+        if insert_action is None:
+            raise HTTPException(status_code=409, detail="Active Task has no insert action.")
+        package = store.state.follow_up_package
+        subject = package.subject if package and package.source_session_id == task.source_session_id else task.title
+        body = package.body if package and package.source_session_id == task.source_session_id else fallback_text
+        if not body or not body.strip():
+            raise HTTPException(status_code=409, detail="No follow-up body is available for Mail draft insertion.")
+        insert_action.status = "insert_requested"
+        task.status = ActiveTaskStatus.CONFIRMED
+        task.updated_at = now_iso()
+        await store.persist()
+        await store.publish(
+            "mail_draft_insert_requested",
+            {"task_id": task.id, "action_id": insert_action.id, "subject": subject},
+            session_id=task.source_session_id,
+        )
+
+    surface = await cua_driver_adapter.mail_compose_surface()
+    text = f"{subject.strip()}\n\n{body.strip()}" if subject.strip() else body.strip()
+    result = await cua_driver_adapter.insert_text(text, surface_hint=surface) if surface.safe else None
+    if result is None:
+        mail_result = MailDraftInsertResult(
+            ok=False,
+            detail=f"Mail compose surface is not ready: {surface.reason}",
+            target_surface=surface,
+        )
+    else:
+        detail = result.detail
+        if result.ok:
+            detail = f"{detail}; mail_compose_only=true; send_action=false"
+        mail_result = MailDraftInsertResult(
+            ok=result.ok,
+            detail=detail,
+            target_surface=surface,
+            metadata=_cua_result_payload(result),
+        )
+
+    async with store._lock:
+        try:
+            task = store.get_task(task_id)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Active Task not found.") from exc
+        insert_action, _ = _insert_action_and_text(task)
+        if insert_action is None:
+            raise HTTPException(status_code=409, detail="Active Task has no insert action.")
+        insert_action.payload["mail_draft_insert_result"] = to_dict(mail_result)
+        insert_action.status = "inserted" if mail_result.ok else "insert_failed"
+        task.status = ActiveTaskStatus.AWAITING_REVIEW if mail_result.ok else ActiveTaskStatus.PENDING
+        task.updated_at = now_iso()
+        store.state.mail_draft_insert_result = mail_result
+        store.state.jarvis_state = JarvisState.AWAITING_REVIEW if mail_result.ok else JarvisState.INTERVENTION_READY
+        await _apply_cua_status(
+            ServiceStatus(
+                name="cua-driver",
+                status="online" if mail_result.ok else "error",
+                detail=mail_result.detail,
+            )
+        )
+        await store.persist()
+        await store.publish(
+            "mail_draft_inserted" if mail_result.ok else "mail_draft_insert_failed",
+            {"task_id": task.id, "result": to_dict(mail_result)},
+            session_id=task.source_session_id,
+        )
+        if not mail_result.ok:
+            raise HTTPException(status_code=502, detail=f"Mail draft insert failed: {mail_result.detail}")
+        return mail_result
+
+
+@app.post("/mail-draft", response_model=MailDraftInsertResult)
+async def active_task_insert_mail_draft_alias():
+    task = _current_task()
+    if not task:
+        raise HTTPException(status_code=409, detail="No active task available for Mail draft insertion.")
+    return await active_task_insert_mail_draft(task.id)
 
 
 @app.post("/active-task/{task_id}/ignore")

@@ -1535,3 +1535,43 @@ swift build --product HippoJarvis
 
 - Hippo 本轮不手写 noVNC/WKWebView 客户端；Sandbox 打开 ai-manus 自己的 VNC/takeover 页面。
 - 本轮不做本机 CUA 与 ai-manus sandbox takeover 的双向同步；本机外部可见插入仍由 `cua-driver` 负责。
+
+## 2026-05-14 Runtime 依赖内置与模型配置收口
+
+### 实现内容
+
+- 新增项目内 runtime bootstrap：
+  - `script/bootstrap_runtimes.sh`
+  - 创建并维护 `.runtime/python`，作为 HippoJarvis/Orchestrator 的唯一 Python runtime。
+  - 构建阶段安装 Orchestrator、OpenChronicle、Basic Memory、vlmac、ownscribe recorder 所需依赖。
+  - ownscribe 只安装 Hippo 当前真实链路需要的 recorder + remote ASR/Summary 依赖，不拉 WhisperX / llama.cpp 本地模型路径。
+- `script/build_and_run.sh` 在构建 app 前自动执行 runtime bootstrap；`--restart-no-build` 只做 runtime check，不在用户启动路径里联网补依赖。
+- `OrchestratorLauncher` 改为强制使用 `.runtime/python/bin/python` 启动 uvicorn，并将 `.runtime/python/bin` 写入 PATH。
+- 状态栏 label 增加启动期 `store.bootstrap()`，避免只依赖 `AppDelegate` 生命周期导致菜单栏 app 已启动但 Orchestrator 未自动拉起。
+- OpenChronicle adapter 优先使用 `.runtime/python/bin/openchronicle`。
+- ownscribe adapter 优先使用 `.runtime/python/bin/python` 运行 recorder child process。
+- Settings 中模型配置收口：
+  - ownscribe ASR/Summary OpenAI-compatible provider 配置。
+  - OpenChronicle Writer 模型配置。
+  - vlmac VLM endpoint 配置。
+  - Basic Memory embedding 配置。
+- Basic Memory 的 OpenAI embedding provider factory 已接入 config 中的 `semantic_embedding_base_url`、`semantic_embedding_api_key`、`semantic_embedding_timeout`。
+
+### 验证结果
+
+- `python -m compileall orchestrator` 通过。
+- `python -m compileall basic-memory/src/basic_memory/repository/embedding_provider_factory.py basic-memory/src/basic_memory/config.py vlmac/server.py` 通过。
+- FastAPI TestClient smoke：
+  - `/integrations/openchronicle/model-config`
+  - `/integrations/vlmac/config`
+  - `/integrations/basic-memory/embedding-config`
+  均返回 `200`。
+- `swift build --product HippoJarvis` 沙箱外通过；沙箱内仍受 SwiftPM/clang cache 权限限制。
+- `./script/build_and_run.sh --verify` 通过；打包后的 HippoJarvis 使用 `.runtime/python/bin/python` 拉起 Orchestrator，`/health` ready。
+- `git diff --check` 通过。
+
+### 当前边界
+
+- `.runtime/python` 是构建/打包产物，不进入 Git。
+- 首次构建需要联网安装 Python wheels；用户打开 app 时不应再安装依赖。
+- 如需分发独立 `.app`，后续 packaging 阶段需要把 `.runtime/python` 与 Python 动态库策略一起纳入 app bundle 或 installer。

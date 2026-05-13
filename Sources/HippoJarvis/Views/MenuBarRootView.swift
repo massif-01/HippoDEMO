@@ -109,17 +109,16 @@ struct MenuBarRootView: View {
 
                 Button {
                     Task {
-                        if store.canFinishCapture {
-                            await store.finishCapture()
-                        } else {
-                            await store.captureSkill()
-                        }
+                        await store.highlight()
                     }
                 } label: {
-                    Label(captureTitle, systemImage: "pin.fill")
+                    Image(systemName: "highlighter")
+                        .frame(width: 20)
                 }
                 .buttonStyle(HippoPushButtonStyle(.neutral, size: .lg))
-                .disabled(store.isBusy || (!store.canCaptureSkill && !store.canFinishCapture))
+                .disabled(store.isBusy)
+                .accessibilityLabel(store.text(.highlight))
+                .help(store.text(.highlight))
             }
         }
 

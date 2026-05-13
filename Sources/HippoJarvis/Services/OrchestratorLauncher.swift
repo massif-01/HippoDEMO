@@ -50,7 +50,7 @@ final class OrchestratorLauncher {
         }
 
         let next = Process()
-        let python = pythonURL()
+        let python = try pythonURL(root: root)
         next.executableURL = python
         if python.path == "/usr/bin/env" {
             next.arguments = ["python3", "-m", "uvicorn", "orchestrator.main:app", "--host", "127.0.0.1", "--port", "8787"]
@@ -59,8 +59,11 @@ final class OrchestratorLauncher {
         }
         next.currentDirectoryURL = root
         var environment = ProcessInfo.processInfo.environment
+        let runtimeBin = root.appending(path: ".runtime/python/bin", directoryHint: .isDirectory)
         environment["PYTHONPATH"] = root.path
         environment["HIPPODEMO_ROOT"] = root.path
+        environment["OWNSCRIBE_PYTHON"] = python.path
+        environment["PATH"] = "\(runtimeBin.path):\(environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin")"
         next.environment = environment
 
         let output = try FileHandle(forWritingTo: logURL)
@@ -98,18 +101,17 @@ final class OrchestratorLauncher {
         return nil
     }
 
-    private func pythonURL() -> URL {
-        let candidates = [
-            "/opt/homebrew/Caskroom/miniconda/base/bin/python",
-            "/opt/homebrew/bin/python3",
-            "/usr/bin/python3",
-        ]
-
-        for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
-            return URL(fileURLWithPath: path)
+    private func pythonURL(root: URL) throws -> URL {
+        let runtimePython = root.appending(path: ".runtime/python/bin/python")
+        if FileManager.default.isExecutableFile(atPath: runtimePython.path) {
+            return runtimePython
         }
 
-        return URL(fileURLWithPath: "/usr/bin/env")
+        log("project runtime missing: \(runtimePython.path)")
+        throw OrchestratorError.badStatus(
+            -1,
+            "Hippo runtime is missing. Run script/build_and_run.sh --bootstrap-runtime before launching the app."
+        )
     }
 
     private func log(_ message: String) {

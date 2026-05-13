@@ -81,6 +81,12 @@ struct AppSnapshot: Codable, Sendable {
     var statusMessage: String
     var currentSession: DemoSession?
     var sopCapture: SopCapture?
+    var highlightSegment: HighlightSegment?
+    var frontmostContext: ForegroundAXSnapshot?
+    var followUpPackage: FollowUpPackage?
+    var mailDraftInsertResult: MailDraftInsertResult?
+    var workerStatuses: [PlanWorkerStatus]?
+    var memoryContextChunks: [MemoryContextChunk]?
     var currentTask: ActiveTask?
     var skills: [SkillRecord]
     var services: [ServiceStatus]
@@ -90,6 +96,12 @@ struct AppSnapshot: Codable, Sendable {
         statusMessage: "Waiting for task",
         currentSession: nil,
         sopCapture: nil,
+        highlightSegment: nil,
+        frontmostContext: nil,
+        followUpPackage: nil,
+        mailDraftInsertResult: nil,
+        workerStatuses: [],
+        memoryContextChunks: [],
         currentTask: nil,
         skills: [],
         services: []
@@ -116,6 +128,104 @@ struct SopCapture: Codable, Sendable {
     var checkIn: String?
     var checkOut: String?
     var state: JarvisState
+}
+
+struct MemoryContextChunk: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var sessionId: String?
+    var source: String
+    var startAt: String
+    var endAt: String
+    var content: String
+    var metadata: [String: JSONValue]
+    var createdAt: String?
+}
+
+struct ForegroundAXSnapshot: Codable, Equatable, Sendable {
+    var bundleId: String?
+    var appName: String?
+    var windowTitle: String?
+    var focusedElement: String?
+    var visibleText: String
+    var treeMarkdown: String
+    var editableFields: [JSONValue]
+    var targetSurface: CuaTargetSurface?
+    var capturedAt: String?
+    var metadata: [String: JSONValue]
+
+    static let empty = ForegroundAXSnapshot(
+        bundleId: nil,
+        appName: nil,
+        windowTitle: nil,
+        focusedElement: nil,
+        visibleText: "",
+        treeMarkdown: "",
+        editableFields: [],
+        targetSurface: nil,
+        capturedAt: nil,
+        metadata: [:]
+    )
+}
+
+struct HighlightSegment: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var checkIn: String?
+    var checkOut: String?
+    var status: String
+    var sourceSessionId: String?
+    var contextPriority: String?
+    var generatedSkillId: String?
+    var contextChunkIds: [String]
+    var error: String?
+}
+
+struct FollowUpPackage: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var subject: String
+    var body: String
+    var minutesPath: String?
+    var contextPriority: String
+    var sourceSessionId: String?
+    var contextChunkIds: [String]
+    var createdAt: String?
+    var metadata: [String: JSONValue]
+}
+
+struct MailDraftInsertResult: Codable, Equatable, Sendable {
+    var ok: Bool
+    var detail: String
+    var targetSurface: CuaTargetSurface?
+    var insertedAt: String?
+    var metadata: [String: JSONValue]
+}
+
+struct PlanWorkerStatus: Identifiable, Codable, Equatable, Sendable {
+    var name: String
+    var status: String
+    var detail: String?
+    var startedAt: String?
+    var updatedAt: String?
+    var metadata: [String: JSONValue]
+
+    var id: String { name }
+}
+
+struct PlanStatus: Codable, Equatable, Sendable {
+    var highlightSegment: HighlightSegment?
+    var frontmostContext: ForegroundAXSnapshot?
+    var followUpPackage: FollowUpPackage?
+    var mailDraftInsertResult: MailDraftInsertResult?
+    var workerStatuses: [PlanWorkerStatus]
+    var memoryContextChunks: [MemoryContextChunk]
+
+    static let empty = PlanStatus(
+        highlightSegment: nil,
+        frontmostContext: nil,
+        followUpPackage: nil,
+        mailDraftInsertResult: nil,
+        workerStatuses: [],
+        memoryContextChunks: []
+    )
 }
 
 struct ActiveTask: Identifiable, Codable, Sendable {
@@ -312,6 +422,163 @@ struct OwnscribePreflightCheck: Identifiable, Codable, Equatable, Sendable {
     var detail: String
 
     var id: String { name }
+}
+
+struct OpenChronicleModelConfig: Codable, Equatable, Sendable {
+    var stage: String?
+    var model: String?
+    var baseUrl: String?
+    var apiKeyEnv: String?
+    var apiKeyConfigured: Bool?
+    var maxTokens: Int?
+    var configPath: String?
+    var configExists: Bool?
+    var restartRequired: Bool?
+
+    static let empty = OpenChronicleModelConfig(
+        stage: "default",
+        model: nil,
+        baseUrl: nil,
+        apiKeyEnv: "OPENAI_API_KEY",
+        apiKeyConfigured: false,
+        maxTokens: nil,
+        configPath: nil,
+        configExists: nil,
+        restartRequired: nil
+    )
+}
+
+struct OpenChronicleModelConfigUpdateRequest: Codable, Sendable {
+    var stage: String?
+    var model: String?
+    var baseUrl: String?
+    var apiKeyEnv: String?
+    var apiKey: String?
+    var maxTokens: Int?
+}
+
+struct VlmacConfig: Codable, Equatable, Sendable {
+    var serviceBaseUrl: String?
+    var vllmBaseUrl: String?
+    var vllmModel: String?
+    var vllmApiKeyConfigured: Bool?
+    var temperature: Double?
+    var maxTokens: Int?
+    var timeoutSeconds: Double?
+    var configPath: String?
+    var envPath: String?
+    var envExists: Bool?
+    var restartRequired: Bool?
+
+    static let empty = VlmacConfig(
+        serviceBaseUrl: nil,
+        vllmBaseUrl: nil,
+        vllmModel: nil,
+        vllmApiKeyConfigured: false,
+        temperature: nil,
+        maxTokens: nil,
+        timeoutSeconds: nil,
+        configPath: nil,
+        envPath: nil,
+        envExists: nil,
+        restartRequired: nil
+    )
+}
+
+struct VlmacConfigUpdateRequest: Codable, Sendable {
+    var serviceBaseUrl: String?
+    var vllmBaseUrl: String?
+    var vllmModel: String?
+    var vllmApiKey: String?
+    var temperature: Double?
+    var maxTokens: Int?
+    var timeoutSeconds: Double?
+}
+
+struct BasicMemoryEmbeddingConfig: Codable, Equatable, Sendable {
+    var configPath: String?
+    var configExists: Bool?
+    var projectPath: String?
+    var defaultProject: String?
+    var semanticSearchEnabled: Bool?
+    var semanticEmbeddingProvider: String?
+    var semanticEmbeddingModel: String?
+    var semanticEmbeddingBaseUrl: String?
+    var semanticEmbeddingApiKeyEnv: String?
+    var semanticEmbeddingApiKeyConfigured: Bool?
+    var semanticEmbeddingDimensions: Int?
+    var semanticEmbeddingBatchSize: Int?
+    var semanticEmbeddingRequestConcurrency: Int?
+    var semanticEmbeddingTimeout: Double?
+    var restartRequired: Bool?
+
+    static let empty = BasicMemoryEmbeddingConfig(
+        configPath: nil,
+        configExists: nil,
+        projectPath: nil,
+        defaultProject: nil,
+        semanticSearchEnabled: nil,
+        semanticEmbeddingProvider: nil,
+        semanticEmbeddingModel: nil,
+        semanticEmbeddingBaseUrl: nil,
+        semanticEmbeddingApiKeyEnv: nil,
+        semanticEmbeddingApiKeyConfigured: false,
+        semanticEmbeddingDimensions: nil,
+        semanticEmbeddingBatchSize: nil,
+        semanticEmbeddingRequestConcurrency: nil,
+        semanticEmbeddingTimeout: nil,
+        restartRequired: nil
+    )
+}
+
+struct BasicMemoryEmbeddingConfigUpdateRequest: Codable, Sendable {
+    var semanticSearchEnabled: Bool?
+    var semanticEmbeddingProvider: String?
+    var semanticEmbeddingModel: String?
+    var semanticEmbeddingBaseUrl: String?
+    var semanticEmbeddingApiKey: String?
+    var semanticEmbeddingApiKeyEnv: String?
+    var semanticEmbeddingDimensions: Int?
+    var semanticEmbeddingBatchSize: Int?
+    var semanticEmbeddingRequestConcurrency: Int?
+    var semanticEmbeddingTimeout: Double?
+}
+
+struct ProjectCortexConfig: Codable, Equatable, Sendable {
+    var useReal: Bool?
+    var serviceBaseUrl: String?
+    var openaiBaseUrl: String?
+    var openaiModel: String?
+    var openaiApiKeyConfigured: Bool?
+    var temperature: Double?
+    var maxTokens: Int?
+    var timeoutSeconds: Double?
+    var configPath: String?
+    var configExists: Bool?
+
+    static let empty = ProjectCortexConfig(
+        useReal: false,
+        serviceBaseUrl: nil,
+        openaiBaseUrl: nil,
+        openaiModel: nil,
+        openaiApiKeyConfigured: false,
+        temperature: nil,
+        maxTokens: nil,
+        timeoutSeconds: nil,
+        configPath: nil,
+        configExists: nil
+    )
+}
+
+struct ProjectCortexConfigUpdateRequest: Codable, Sendable {
+    var useReal: Bool?
+    var serviceBaseUrl: String?
+    var openaiBaseUrl: String?
+    var openaiModel: String?
+    var openaiApiKey: String?
+    var temperature: Double?
+    var maxTokens: Int?
+    var timeoutSeconds: Double?
 }
 
 struct RecordingTimeline: Codable, Equatable, Sendable {

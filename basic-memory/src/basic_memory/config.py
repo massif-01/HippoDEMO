@@ -231,6 +231,23 @@ class BasicMemoryConfig(BaseSettings):
         default=None,
         description="Embedding vector dimensions. Auto-detected from provider if not set (384 for FastEmbed, 1536 for OpenAI).",
     )
+    semantic_embedding_base_url: str | None = Field(
+        default=None,
+        description="Optional OpenAI-compatible embeddings base URL. Used when semantic_embedding_provider is openai.",
+    )
+    semantic_embedding_api_key: str | None = Field(
+        default=None,
+        description="Optional API key for the OpenAI-compatible embeddings provider. Prefer local config only.",
+    )
+    semantic_embedding_api_key_env: str = Field(
+        default="OPENAI_API_KEY",
+        description="Environment variable used for the OpenAI-compatible embeddings API key when no key is stored in config.",
+    )
+    semantic_embedding_timeout: float = Field(
+        default=30.0,
+        description="Timeout in seconds for OpenAI-compatible embedding requests.",
+        gt=0,
+    )
     # Trigger: full local rebuilds spend most of their time waiting behind shared
     # embed flushes, not constructing vectors themselves.
     # Why: smaller FastEmbed batches cut queue wait far more than they increase

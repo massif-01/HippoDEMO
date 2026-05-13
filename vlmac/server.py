@@ -21,8 +21,27 @@ from pydantic import BaseModel, Field
 
 app = FastAPI()
 
+def load_local_env():
+    env_path = Path(__file__).with_name(".env")
+    if not env_path.exists():
+        return
+    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        os.environ.setdefault(key, value)
+
+
+load_local_env()
 VLLM_BASE = os.environ.get("VLLM_BASE_URL", "http://localhost:58000")
 VLLM_MODEL = os.environ.get("VLLM_MODEL", "RM-01 VLM")
+VLLM_API_KEY = os.environ.get("VLLM_API_KEY", "")
+VLLM_TEMPERATURE = float(os.environ.get("VLLM_TEMPERATURE", "0.7"))
+VLLM_MAX_TOKENS = int(os.environ.get("VLLM_MAX_TOKENS", "2048"))
+VLLM_TIMEOUT_SECONDS = float(os.environ.get("VLLM_TIMEOUT_SECONDS", "120"))
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -39,6 +58,12 @@ minio_client = Minio(
     secret_key=MINIO_SECRET_KEY,
     secure=False,
 )
+
+
+def vlm_headers() -> dict[str, str]:
+    if not VLLM_API_KEY:
+        return {}
+    return {"Authorization": f"Bearer {VLLM_API_KEY}"}
 
 # Ensure bucket exists
 if not minio_client.bucket_exists(MINIO_BUCKET):
@@ -518,13 +543,14 @@ async def _task_loop(task_id: str):
             try:
                 resp = await client.post(
                     f"{VLLM_BASE}/v1/chat/completions",
+                    headers=vlm_headers(),
                     json={
                         "model": VLLM_MODEL,
                         "messages": messages,
-                        "max_tokens": 2048,
-                        "temperature": 0.7,
+                        "max_tokens": VLLM_MAX_TOKENS,
+                        "temperature": VLLM_TEMPERATURE,
                     },
-                    timeout=120.0,
+                    timeout=VLLM_TIMEOUT_SECONDS,
                 )
                 if resp.status_code == 200:
                     data = resp.json()
@@ -603,9 +629,9 @@ async def stream_vlm_response(
     payload = {
         "model": VLLM_MODEL,
         "messages": messages,
-        "max_tokens": 2048,
+        "max_tokens": VLLM_MAX_TOKENS,
         "stream": True,
-        "temperature": 0.7,
+        "temperature": VLLM_TEMPERATURE,
     }
 
     full_text = ""
@@ -613,8 +639,9 @@ async def stream_vlm_response(
         async with client.stream(
             "POST",
             f"{VLLM_BASE}/v1/chat/completions",
+            headers=vlm_headers(),
             json=payload,
-            timeout=120.0,
+            timeout=VLLM_TIMEOUT_SECONDS,
         ) as resp:
             if resp.status_code != 200:
                 body = await resp.aread()

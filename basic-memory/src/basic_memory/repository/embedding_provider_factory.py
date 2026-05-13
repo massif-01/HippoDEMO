@@ -6,16 +6,7 @@ from threading import Lock
 from basic_memory.config import BasicMemoryConfig, default_fastembed_cache_dir
 from basic_memory.repository.embedding_provider import EmbeddingProvider
 
-type ProviderCacheKey = tuple[
-    str,
-    str,
-    int | None,
-    int,
-    int,
-    str,
-    int | None,
-    int | None,
-]
+type ProviderCacheKey = tuple[object, ...]
 
 _EMBEDDING_PROVIDER_CACHE: dict[ProviderCacheKey, EmbeddingProvider] = {}
 _EMBEDDING_PROVIDER_CACHE_LOCK = Lock()
@@ -82,12 +73,18 @@ def _provider_cache_key(app_config: BasicMemoryConfig) -> ProviderCacheKey:
     config field itself is unset.
     """
     resolved_threads, resolved_parallel = _resolve_fastembed_runtime_knobs(app_config)
+    api_key_env = app_config.semantic_embedding_api_key_env or ""
+    api_key_marker = hash(app_config.semantic_embedding_api_key or (os.getenv(api_key_env) if api_key_env else "") or "")
     return (
         app_config.semantic_embedding_provider.strip().lower(),
         app_config.semantic_embedding_model,
         app_config.semantic_embedding_dimensions,
         app_config.semantic_embedding_batch_size,
         app_config.semantic_embedding_request_concurrency,
+        app_config.semantic_embedding_base_url,
+        api_key_marker,
+        app_config.semantic_embedding_api_key_env,
+        app_config.semantic_embedding_timeout,
         _resolve_cache_dir(app_config),
         resolved_threads,
         resolved_parallel,
@@ -145,10 +142,17 @@ def create_embedding_provider(app_config: BasicMemoryConfig) -> EmbeddingProvide
         model_name = app_config.semantic_embedding_model or "text-embedding-3-small"
         if model_name == "bge-small-en-v1.5":
             model_name = "text-embedding-3-small"
+        api_key_env = (app_config.semantic_embedding_api_key_env or "").strip()
+        api_key = app_config.semantic_embedding_api_key or (
+            os.getenv(api_key_env) if api_key_env else None
+        )
         provider = OpenAIEmbeddingProvider(
             model_name=model_name,
             batch_size=app_config.semantic_embedding_batch_size,
             request_concurrency=app_config.semantic_embedding_request_concurrency,
+            api_key=api_key,
+            base_url=app_config.semantic_embedding_base_url or None,
+            timeout=app_config.semantic_embedding_timeout,
             **extra_kwargs,
         )
     else:
