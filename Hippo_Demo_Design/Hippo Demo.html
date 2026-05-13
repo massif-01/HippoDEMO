@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HippoDEMO · macOS 26 Liquid Glass</title>
+<style>
+  html, body { margin: 0; height: 100%; background: oklch(15% 0.04 270); font-family: "SF Pro", -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+  * { box-sizing: border-box; }
+  @keyframes hippo-pulse {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(1.4); opacity: 0.7; }
+  }
+  @keyframes hippo-wave {
+    from { transform: scaleY(0.5); }
+    to   { transform: scaleY(1.0); }
+  }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.18); border-radius: 100px; border: 2px solid transparent; background-clip: padding-box; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="design-canvas.jsx"></script>
+<script type="text/babel" src="hippo-shared.jsx"></script>
+<script type="text/babel" src="hippo-menubar.jsx"></script>
+<script type="text/babel" src="hippo-review.jsx"></script>
+<script type="text/babel" src="hippo-pages-shared.jsx"></script>
+<script type="text/babel" src="hippo-pages-activity.jsx"></script>
+<script type="text/babel" src="hippo-pages-content.jsx"></script>
+<script type="text/babel" src="hippo-pages-chat.jsx"></script>
+<script type="text/babel" src="hippo-dashboard.jsx"></script>
+
+<script type="text/babel">
+const { DesignCanvas, DCSection, DCArtboard } = window;
+const { MenuBarArtboard } = window.HippoMenuBar;
+const { ReviewArtboard } = window.HippoReview;
+const { DashboardArtboard } = window.HippoDashboard;
+
+function App() {
+  return (
+    <DesignCanvas
+      title="HippoDEMO · macOS 26 Liquid Glass"
+      subtitle="Menu bar · Review popover · Unified dashboard with five sub-pages"
+    >
+      <DCSection id="menubar" title="01 · Menu bar & Popover">
+        <DCArtboard id="menubar-popover" label="Status menu — recording active" width={760} height={780}>
+          <MenuBarArtboard />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="review" title="02 · Review Popover — task ready">
+        <DCArtboard id="review-popover" label="Popover anchored under menu extra" width={760} height={780}>
+          <ReviewArtboard />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="dashboard" title="03 · Dashboard sub-pages">
+        <DCArtboard id="dash-chat"     label="Chat — agent conversation"        width={1280} height={820}>
+          <DashboardArtboard view="chat" />
+        </DCArtboard>
+        <DCArtboard id="dash-live"     label="Live Signal — event timeline"   width={1280} height={820}>
+          <DashboardArtboard view="live" />
+        </DCArtboard>
+        <DCArtboard id="dash-task"     label="Active Task — review &amp; insert" width={1280} height={820}>
+          <DashboardArtboard view="task" />
+        </DCArtboard>
+        <DCArtboard id="dash-sessions" label="Sessions — history table"       width={1280} height={820}>
+          <DashboardArtboard view="sessions" />
+        </DCArtboard>
+        <DCArtboard id="dash-skills"   label="Skill Library — markdown viewer" width={1280} height={820}>
+          <DashboardArtboard view="skills" />
+        </DCArtboard>
+        <DCArtboard id="dash-settings" label="Settings — developer console"   width={1280} height={820}>
+          <DashboardArtboard view="settings" />
+        </DCArtboard>
+      </DCSection>
+
+      <DCSection id="dashboard-collapsed" title="04 · Dashboard — sidebar collapsed">
+        <DCArtboard id="dash-chat-col"     label="Chat (collapsed)"             width={1280} height={820}>
+          <DashboardArtboard view="chat" collapsed />
+        </DCArtboard>
+        <DCArtboard id="dash-task-col"     label="Active Task (collapsed)"      width={1280} height={820}>
+          <DashboardArtboard view="task" collapsed />
+        </DCArtboard>
+        <DCArtboard id="dash-skills-col"   label="Skill (collapsed reading)"    width={1280} height={820}>
+          <DashboardArtboard view="skills" collapsed />
+        </DCArtboard>
+        <DCArtboard id="dash-sessions-col" label="Sessions (collapsed table)"   width={1280} height={820}>
+          <DashboardArtboard view="sessions" collapsed />
+        </DCArtboard>
+      </DCSection>
+    </DesignCanvas>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

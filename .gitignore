@@ -1,0 +1,54 @@
+.DS_Store
+**/.DS_Store
+.codex/
+.nested-git-backups/
+
+# SwiftPM / app bundle outputs
+.build/
+**/.build/
+.swiftpm/
+**/.swiftpm/
+dist/
+*.app
+*.dSYM/
+DerivedData/
+*.xcuserstate
+
+# Local runtime logs and pid files
+.runtime/
+*.log
+*.pid
+*.tmp
+*.db
+*.sqlite
+*.wav
+*.mp4
+
+# Orchestrator mock runtime data
+orchestrator/data/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc
+.venv/
+**/.venv/
+.pytest_cache/
+**/.pytest_cache/
+
+# Python packaging / test outputs
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# JS dependencies / local env
+node_modules/
+**/node_modules/
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Local design scratch state
+Hippo_Demo_Design/.design-canvas.state.json

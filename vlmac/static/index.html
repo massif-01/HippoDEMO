@@ -1,0 +1,1549 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>VLMac - 视觉洞察助手</title>
+<style>
+:root {
+  --bg: #0f0f0f;
+  --surface: #1a1a1a;
+  --surface2: #252525;
+  --border: #333;
+  --text: #e0e0e0;
+  --text2: #888;
+  --accent: #4a9eff;
+  --accent2: #2d7ad6;
+  --green: #4caf50;
+  --red: #ef5350;
+  --orange: #ff9800;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  overflow: hidden;
+}
+
+.app {
+  display: grid;
+  grid-template-columns: 360px 1fr;
+  grid-template-rows: 48px 1fr;
+  height: 100vh;
+}
+
+/* Header */
+.header {
+  grid-column: 1 / -1;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 16px;
+}
+
+.header h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.header .status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text2);
+}
+
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--red);
+}
+
+.status-dot.connected { background: var(--green); }
+.status-dot.streaming { background: var(--orange); animation: pulse 1s infinite; }
+.status-dot.analyzing { background: var(--accent); animation: pulse 0.6s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Left panel */
+.panel {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.panel section {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel section h3 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--text2);
+  margin-bottom: 8px;
+}
+
+/* Video preview */
+.video-container {
+  position: relative;
+  background: #000;
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: 16/9;
+}
+
+.video-container video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.video-container .overlay {
+  position: absolute;
+  bottom: 4px;
+  right: 4px;
+  background: rgba(0,0,0,0.7);
+  color: #fff;
+  font-size: 10px;
+  padding: 2px 6px;
+  border-radius: 3px;
+}
+
+
+
+
+
+/* Controls */
+select, input[type="text"], textarea {
+  width: 100%;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 4px;
+  padding: 6px 8px;
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+}
+
+select:focus, input:focus, textarea:focus {
+  border-color: var(--accent);
+}
+
+textarea {
+  resize: vertical;
+  min-height: 60px;
+}
+
+label {
+  display: block;
+  font-size: 12px;
+  color: var(--text2);
+  margin-bottom: 4px;
+}
+
+.control-row {
+  margin-bottom: 8px;
+}
+
+.slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.slider-row input[type="range"] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.slider-row span {
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  min-width: 32px;
+  text-align: right;
+}
+
+/* Buttons */
+.btn {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #fff;
+}
+
+.btn-primary:hover { background: var(--accent2); }
+
+.btn-danger {
+  background: var(--red);
+  color: #fff;
+}
+
+.btn-danger:hover { background: #d32f2f; }
+
+.btn-secondary {
+  background: var(--surface2);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover { background: var(--border); }
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-group {
+  display: flex;
+  gap: 8px;
+}
+
+
+
+/* Chat area */
+.chat {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chat-messages {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.message {
+  margin-bottom: 16px;
+  animation: fadein 0.3s;
+}
+
+@keyframes fadein {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.message-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.message-header .role {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent);
+}
+
+.message-header .time {
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.message-header .badge {
+  font-size: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 1px 6px;
+  border-radius: 8px;
+  color: var(--text2);
+}
+
+.message-body {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+  padding-left: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.message-body .cursor {
+  display: inline-block;
+  width: 2px;
+  height: 14px;
+  background: var(--accent);
+  animation: blink 0.8s infinite;
+  vertical-align: text-bottom;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+
+.message.error .message-body {
+  color: var(--red);
+}
+
+/* Chat input */
+.chat-input {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.chat-input input {
+  flex: 1;
+}
+
+
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text2); }
+
+/* Stats bar */
+.stats {
+  display: flex;
+  gap: 16px;
+  font-size: 11px;
+  color: var(--text2);
+}
+
+.stats span { font-variant-numeric: tabular-nums; }
+
+
+
+
+
+/* Storage panel */
+.storage-list {
+  max-height: 200px;
+  overflow-y: auto;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Consolas', monospace;
+}
+.storage-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+  cursor: pointer;
+  gap: 6px;
+}
+.storage-item:hover { background: var(--surface2); }
+.storage-item .si-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--accent);
+}
+.storage-item .si-meta {
+  color: var(--text2);
+  white-space: nowrap;
+  font-size: 10px;
+}
+.storage-stats {
+  font-size: 11px;
+  color: var(--text2);
+  margin-bottom: 6px;
+  display: flex;
+  justify-content: space-between;
+}
+.storage-viewer {
+  display: none;
+  margin-top: 8px;
+}
+.storage-viewer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
+}
+.storage-viewer-header span {
+  font-size: 11px;
+  color: var(--accent);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.storage-viewer-content {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  max-height: 300px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Task management */
+.task-list {
+  max-height: 200px;
+  overflow-y: auto;
+}
+.task-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-size: 12px;
+}
+.task-item:last-child { border-bottom: none; }
+.task-dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.task-dot.running { background: var(--green); animation: pulse 2s infinite; }
+.task-dot.stopped { background: var(--text2); }
+.task-info {
+  flex: 1;
+  overflow: hidden;
+}
+.task-info .task-id {
+  font-family: 'SF Mono', 'Consolas', monospace;
+  color: var(--accent);
+  font-size: 11px;
+}
+.task-info .task-meta {
+  font-size: 10px;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-item .btn-task-del {
+  background: none;
+  border: 1px solid var(--border);
+  color: var(--red);
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 6px;
+  flex-shrink: 0;
+}
+.task-item .btn-task-del:hover { background: var(--red); color: #fff; }
+.task-empty {
+  color: var(--text2);
+  font-size: 11px;
+  font-style: italic;
+  padding: 4px 0;
+}
+.task-create {
+  margin-top: 8px;
+  display: flex;
+  gap: 6px;
+}
+.task-create select, .task-create input {
+  font-size: 11px;
+  padding: 4px 6px;
+}
+.event-log {
+  max-height: 150px;
+  overflow-y: auto;
+  font-size: 11px;
+  font-family: 'SF Mono', 'Consolas', monospace;
+  line-height: 1.5;
+  color: var(--text2);
+}
+.event-log .ev {
+  display: flex;
+  gap: 6px;
+  padding: 1px 0;
+  border-bottom: 1px solid rgba(255,255,255,0.03);
+}
+.event-log .ev:hover { background: var(--surface2); }
+.event-log .ev-t { color: var(--accent); min-width: 42px; text-align: right; }
+.event-log .ev-type { min-width: 48px; }
+.event-log .ev-type.micro { color: var(--text2); }
+.event-log .ev-type.local { color: var(--orange); }
+.event-log .ev-type.partial { color: #fff176; }
+.event-log .ev-type.major { color: var(--green); }
+.event-log .ev-type.switch { color: var(--red); }
+.event-log .ev-desc { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.event-log-empty { color: var(--text2); font-size: 11px; font-style: italic; }
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- Header -->
+  <div class="header">
+    <h1>⚡ VLMac</h1>
+    <div class="status">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">未连接</span>
+    </div>
+    <div style="flex:1"></div>
+    <div class="stats">
+      <span>查询: <b id="statRequests">0</b></span>
+      <span>时长: <b id="statDuration">0s</b></span>
+      <span>数据: <b id="statSize">0 KB</b></span>
+      <span id="inputBadge" class="badge">停止</span>
+    </div>
+  </div>
+
+  <!-- Left Panel -->
+  <div class="panel">
+    <section>
+      <h3>视频源</h3>
+      <div class="video-container">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="overlay" id="resolution">-</div>
+
+      </div>
+
+      <div class="control-row" style="margin-top:8px">
+        <label>视频设备</label>
+        <select id="deviceSelect"><option value="">正在加载...</option></select>
+      </div>
+      <div class="control-row">
+        <label>分辨率</label>
+        <select id="resSelect">
+          <option value="1920x1080" selected>1920×1080 (Full HD)</option>
+          <option value="1280x720">1280×720 (HD)</option>
+          <option value="3840x2160">3840×2160 (4K)</option>
+          <option value="640x480">640×480 (VGA)</option>
+        </select>
+      </div>
+      <div style="font-size:11px;color:var(--text2);margin-top:2px">
+        <span id="deviceInfo"></span>
+      </div>
+
+      <button class="btn btn-primary" style="width:100%;padding:8px;font-size:13px;font-weight:600;margin-top:8px" id="btnStream">▶ 开启视频流</button>
+      <div id="streamIndicator" style="display:none;margin-top:6px">
+        <div style="display:flex;gap:12px;font-size:11px;color:var(--text2)">
+          <span>⏱ <span id="streamDuration">0:00</span></span>
+          <span>📦 <span id="streamChunks">0 段</span></span>
+          <span>💾 <span id="streamSize">0 KB</span></span>
+          <span>|</span>
+          <span id="activityLevel" style="color:var(--text2)">—</span>
+          <span id="eventCount" style="color:var(--text2)">0 事件</span>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h3>变化事件 <span id="eventCountHeader" style="float:right;font-weight:400;text-transform:none;letter-spacing:0">0</span></h3>
+      <div id="eventLog" class="event-log">
+        <div class="event-log-empty">开启视频流后，检测到的画面变化会实时显示在这里</div>
+      </div>
+    </section>
+
+    <section>
+      <h3>分析设置</h3>
+      <div class="control-row">
+        <label>变化灵敏度 <small style="color:var(--text2)">(越低越敏感)</small></label>
+        <div class="slider-row">
+          <input type="range" id="sceneThreshold" min="0.01" max="0.3" value="0.05" step="0.01">
+          <span id="sceneThresholdVal">0.05</span>
+        </div>
+      </div>
+      <div class="control-row">
+        <label>保底采样间隔</label>
+        <div class="slider-row">
+          <input type="range" id="minInterval" min="1" max="10" value="3" step="1">
+          <span id="minIntervalVal">3s</span>
+        </div>
+      </div>
+      <div class="control-row">
+        <label>视频码率</label>
+        <select id="bitrate">
+          <option value="500000">500 Kbps (低)</option>
+          <option value="1000000" selected>1 Mbps (中)</option>
+          <option value="2000000">2 Mbps (高)</option>
+          <option value="4000000">4 Mbps (超高)</option>
+        </select>
+      </div>
+    </section>
+
+    <section>
+      <h3>定时任务 <span id="taskBadge" style="float:right;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text2)">0</span></h3>
+      <div class="task-list" id="taskList">
+        <div class="task-empty">无运行中的任务</div>
+      </div>
+      <div style="margin-top:8px">
+        <div class="control-row">
+          <label>查询间隔（秒）</label>
+          <div style="display:flex;gap:6px;align-items:center">
+            <input type="number" id="taskInterval" value="30" min="5" max="3600" style="width:70px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;padding:5px 6px;font-size:13px;text-align:center">
+            <span style="font-size:11px;color:var(--text2)">5–3600</span>
+          </div>
+        </div>
+        <div class="control-row">
+          <label>任务提示词</label>
+          <textarea id="taskPrompt" rows="2" style="font-size:12px" placeholder="每次定时查询发送的提示词">请描述当前画面中的内容和变化。</textarea>
+        </div>
+        <button class="btn btn-primary" style="width:100%;padding:8px;font-size:13px;font-weight:600" id="btnCreateTask">➕ 创建定时任务</button>
+      </div>
+      <div style="font-size:10px;color:var(--text2);margin-top:6px">
+        定时任务共享浏览器推送的视频流，每次触发时消费缓冲区并分析。可同时运行多个任务。
+      </div>
+    </section>
+
+
+
+    <section>
+      <h3>系统提示</h3>
+      <div class="control-row">
+        <textarea id="systemPrompt" rows="4">你是一个敏锐的视觉观察助手。你会收到一段连续视频流中按时间顺序排列的帧截图。每帧标注了时间戳和前端检测到的画面像素变化区域及比例。
+请你特别注意：
+1. 前后帧之间的具体视觉差异（内容变化、位移、出现/消失的元素等）
+2. 人物的动作和表情变化
+3. 画面中元素的任何状态变化
+注意：帧标注仅描述像素层面的变化范围，不代表具体操作类型。请根据你自己的视觉分析来判断实际发生了什么。</textarea>
+      </div>
+    </section>
+
+    <section>
+      <button class="btn btn-secondary" id="btnClear" style="width:100%">🗑 清除全部</button>
+    </section>
+
+    <section>
+      <h3>存储桶 <span id="storageBadge" style="float:right;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text2)">-</span></h3>
+      <div class="storage-stats">
+        <span id="storageCount">0 文件</span>
+        <span id="storageSize">0 KB</span>
+        <button class="btn btn-secondary" style="padding:2px 8px;font-size:10px" id="btnRefreshStorage">↻ 刷新</button>
+      </div>
+      <div class="storage-list" id="storageList">
+        <div style="color:var(--text2);font-style:italic">点击刷新加载文件列表</div>
+      </div>
+      <div class="storage-viewer" id="storageViewer">
+        <div class="storage-viewer-header">
+          <span id="storageViewerName"></span>
+          <button class="btn btn-secondary" style="padding:1px 6px;font-size:10px" id="btnCloseViewer">✕</button>
+        </div>
+        <div class="storage-viewer-content" id="storageViewerContent"></div>
+      </div>
+    </section>
+  </div>
+
+  <!-- Chat Area -->
+  <div class="chat">
+    <div class="chat-messages" id="chatMessages">
+      <div class="message">
+        <div class="message-header">
+          <span class="role">系统</span>
+        </div>
+        <div class="message-body">开启视频流后，输入问题即可对视频内容进行分析。创建定时任务可自动周期性分析。</div>
+      </div>
+    </div>
+    <div class="chat-input">
+      <input type="text" id="chatInput" placeholder="开启视频流后输入问题，分析缓冲区中的视频帧...（Enter 发送）">
+      <button class="btn btn-primary" id="btnSend">发送</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+
+let ws = null;
+let videoStream = null;
+let requestCount = 0;
+let isStreaming = false;
+let mediaRecorder = null;
+let streamMime = '';
+let streamStartTime = 0;
+let streamTimerInterval = null;
+let recorderGeneration = 0;
+let currentDuration = 0;
+let currentSizeKB = 0;
+let activityEvents = [];
+let prevImageData = null;
+
+// ---- WebSocket ----
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onopen = () => {
+    setStatus('connected', '已连接');
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    handleWSMessage(msg);
+  };
+
+  ws.onclose = () => {
+    setStatus('disconnected', '已断开');
+    setTimeout(connectWS, 2000);
+  };
+
+  ws.onerror = () => ws.close();
+}
+
+function setStatus(state, text) {
+  const dot = $('#statusDot');
+  dot.className = 'status-dot';
+  if (state === 'connected') dot.classList.add('connected');
+  if (state === 'streaming') dot.classList.add('streaming');
+  if (state === 'analyzing') dot.classList.add('analyzing');
+  $('#statusText').textContent = text;
+}
+
+// ---- Message handling ----
+const messageElements = {};
+
+function handleWSMessage(msg) {
+  switch (msg.type) {
+    case 'stream_status':
+      currentDuration = msg.duration || 0;
+      currentSizeKB = msg.size_kb || 0;
+      $('#streamChunks').textContent = (msg.chunks || 0) + ' 段';
+      $('#streamSize').textContent = formatSize(currentSizeKB);
+      $('#statSize').textContent = formatSize(currentSizeKB);
+      $('#statDuration').textContent = Math.round(currentDuration) + 's';
+      break;
+
+    case 'stream_reset':
+      // Server cleared video buffer after query — restart MediaRecorder
+      currentDuration = 0;
+      currentSizeKB = 0;
+      $('#streamChunks').textContent = '0 段';
+      $('#streamSize').textContent = '0 KB';
+      $('#streamDuration').textContent = '0:00';
+      $('#statSize').textContent = '0 KB';
+      $('#statDuration').textContent = '0s';
+      activityEvents = [];
+      prevImageData = null;
+      updateEventCount();
+      clearEventLog();
+      updateBadge();
+      if (isStreaming) {
+        restartMediaRecorder();
+      }
+      break;
+
+    case 'start':
+      requestCount++;
+      $('#statRequests').textContent = requestCount;
+      const framesUsed = msg.frames_used || 0;
+      const totalExtracted = msg.total_extracted || 0;
+      let framesInfo = totalExtracted > framesUsed
+        ? `${totalExtracted}→${framesUsed} 帧`
+        : `${framesUsed} 帧`;
+      if (msg.activity_events) framesInfo += ` · ${msg.activity_events} 事件`;
+      const durInfo = msg.video_duration ? ` / ${msg.video_duration}s` : '';
+      setStatus('analyzing', `分析中 (${framesInfo}${durInfo})...`);
+      createMessage(msg.id, 'assistant', framesInfo, msg.video_duration);
+      break;
+
+    case 'token':
+      appendToken(msg.id, msg.text);
+      break;
+
+    case 'done':
+      finishMessage(msg.id);
+      setStatus('connected', '已连接');
+      setTimeout(refreshStorage, 2000);
+      break;
+
+    case 'error':
+      if (msg.id && messageElements[msg.id]) {
+        const el = messageElements[msg.id];
+        el.closest('.message').classList.add('error');
+        el.textContent = `错误: ${msg.text}`;
+        removeCursor(msg.id);
+      } else {
+        addSystemMessage(`错误: ${msg.text}`, true);
+      }
+      setStatus('connected', '已连接');
+      break;
+
+    case 'history_cleared':
+      addSystemMessage('对话历史已清除');
+      break;
+
+    case 'task_created':
+      addSystemMessage(`定时任务 ${msg.task_id} 已创建 (${msg.interval}s)`);
+      refreshWsTasks();
+      break;
+
+    case 'task_deleted':
+      addSystemMessage(`任务 ${msg.task_id} 已停止`);
+      refreshWsTasks();
+      break;
+
+    case 'task_start':
+      requestCount++;
+      $('#statRequests').textContent = requestCount;
+      createMessage(msg.id, 'assistant',
+        `${msg.frames_used} 帧` + (msg.activity_events ? ` · ${msg.activity_events} 事件` : ''),
+        msg.video_duration,
+        `任务 ${msg.task_id}`);
+      break;
+
+    case 'task_result':
+      // Task query cycle completed
+      refreshWsTasks();
+      break;
+
+    case 'task_error':
+      addSystemMessage(`任务 ${msg.task_id} 错误: ${msg.text}`, true);
+      break;
+
+    case 'task_list':
+      renderWsTaskList(msg.tasks || []);
+      break;
+
+    case 'pong':
+      break;
+  }
+}
+
+function createMessage(id, role, framesInfo, videoDuration, taskLabel) {
+  const container = $('#chatMessages');
+  const div = document.createElement('div');
+  div.className = 'message';
+  const badges = [];
+  if (taskLabel) badges.push(taskLabel);
+  if (framesInfo) badges.push(framesInfo);
+  if (videoDuration) badges.push(`${videoDuration}s 视频`);
+  const badgeHtml = badges.map(b => `<span class="badge">${escapeHTML(String(b))}</span>`).join('');
+  div.innerHTML = `
+    <div class="message-header">
+      <span class="role">${role === 'assistant' ? 'VLM' : '用户'}</span>
+      <span class="time">${new Date().toLocaleTimeString()}</span>
+      ${badgeHtml}
+    </div>
+    <div class="message-body" id="msg-${id}"><span class="cursor"></span></div>
+  `;
+  container.appendChild(div);
+  messageElements[id] = document.getElementById(`msg-${id}`);
+  scrollToBottom();
+}
+
+function appendToken(id, text) {
+  const el = messageElements[id];
+  if (!el) return;
+  const cursor = el.querySelector('.cursor');
+  if (cursor) {
+    cursor.insertAdjacentText('beforebegin', text);
+  } else {
+    el.textContent += text;
+  }
+  scrollToBottom();
+}
+
+function finishMessage(id) {
+  removeCursor(id);
+}
+
+function removeCursor(id) {
+  const el = messageElements[id];
+  if (!el) return;
+  const cursor = el.querySelector('.cursor');
+  if (cursor) cursor.remove();
+}
+
+function addSystemMessage(text, isError = false) {
+  const container = $('#chatMessages');
+  const div = document.createElement('div');
+  div.className = 'message' + (isError ? ' error' : '');
+  div.innerHTML = `
+    <div class="message-header"><span class="role">系统</span><span class="time">${new Date().toLocaleTimeString()}</span></div>
+    <div class="message-body">${escapeHTML(text)}</div>
+  `;
+  container.appendChild(div);
+  scrollToBottom();
+}
+
+function addUserMessage(text) {
+  const container = $('#chatMessages');
+  const div = document.createElement('div');
+  div.className = 'message';
+  div.innerHTML = `
+    <div class="message-header"><span class="role">用户</span><span class="time">${new Date().toLocaleTimeString()}</span></div>
+    <div class="message-body">${escapeHTML(text)}</div>
+  `;
+  container.appendChild(div);
+  scrollToBottom();
+}
+
+function escapeHTML(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function scrollToBottom() {
+  const c = $('#chatMessages');
+  c.scrollTop = c.scrollHeight;
+}
+
+// ---- Camera ----
+const UVC_KEYWORDS = ['capture', 'uvc', 'hdmi', 'cam link', 'elgato', 'magewell',
+  'avermedia', 'blackmagic', 'decklink', 'inogeni', 'j5create', 'pengo',
+  'digitnow', 'video grabber', 'game capture', '采集', '采集卡', 'usb video'];
+
+function isLikelyUVC(label) {
+  const lower = label.toLowerCase();
+  return UVC_KEYWORDS.some(k => lower.includes(k));
+}
+
+async function loadDevices() {
+  const sel = $('#deviceSelect');
+  try {
+    // Request permission first (may fail on non-HTTPS)
+    const tempStream = await navigator.mediaDevices.getUserMedia({ video: true });
+    tempStream.getTracks().forEach(t => t.stop());
+
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const videoDevices = devices.filter(d => d.kind === 'videoinput');
+    sel.innerHTML = '';
+
+    if (videoDevices.length === 0) {
+      sel.innerHTML = '<option value="">未找到浏览器视频设备</option>';
+      return;
+    }
+
+    const uvcDevices = [];
+    const camDevices = [];
+    videoDevices.forEach((d, i) => {
+      const label = d.label || `视频设备 ${i + 1}`;
+      if (isLikelyUVC(label)) {
+        uvcDevices.push({ device: d, label });
+      } else {
+        camDevices.push({ device: d, label });
+      }
+    });
+
+    if (uvcDevices.length > 0) {
+      const grp = document.createElement('optgroup');
+      grp.label = '📹 UVC 采集卡';
+      uvcDevices.forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = d.device.deviceId;
+        opt.textContent = d.label;
+        grp.appendChild(opt);
+      });
+      sel.appendChild(grp);
+    }
+
+    if (camDevices.length > 0) {
+      const grp = document.createElement('optgroup');
+      grp.label = '📷 摄像头';
+      camDevices.forEach(d => {
+        const opt = document.createElement('option');
+        opt.value = d.device.deviceId;
+        opt.textContent = d.label;
+        grp.appendChild(opt);
+      });
+      sel.appendChild(grp);
+    }
+
+    const preferred = uvcDevices.length > 0 ? uvcDevices[0] : camDevices[0];
+    sel.value = preferred.device.deviceId;
+    startCamera(preferred.device.deviceId);
+  } catch (e) {
+    // Non-HTTPS or no camera permission — preview unavailable
+    sel.innerHTML = '<option value="">预览不可用（需 HTTPS 或 localhost）</option>';
+    $('#deviceInfo').textContent = '视频预览需要安全上下文，采集功能不受影响';
+  }
+}
+
+async function startCamera(deviceId) {
+  if (videoStream) {
+    videoStream.getTracks().forEach(t => t.stop());
+  }
+
+  const [wStr, hStr] = ($('#resSelect').value || '1920x1080').split('x');
+  const reqW = parseInt(wStr), reqH = parseInt(hStr);
+
+  try {
+    videoStream = await navigator.mediaDevices.getUserMedia({
+      video: {
+        deviceId: deviceId ? { exact: deviceId } : undefined,
+        width: { ideal: reqW },
+        height: { ideal: reqH },
+      }
+    });
+    const vid = $('#video');
+    vid.srcObject = videoStream;
+    vid.onloadedmetadata = () => {
+      const w = vid.videoWidth, h = vid.videoHeight;
+      $('#resolution').textContent = `${w}×${h}`;
+      // Show device info
+      const track = videoStream.getVideoTracks()[0];
+      const settings = track.getSettings();
+      const fps = settings.frameRate ? `${Math.round(settings.frameRate)}fps` : '';
+      const lbl = track.label || '';
+      const uvcTag = isLikelyUVC(lbl) ? ' [UVC]' : '';
+      $('#deviceInfo').textContent = `${lbl}${uvcTag} ${w}×${h} ${fps}`.trim();
+    };
+  } catch (e) {
+    addSystemMessage(`设备启动失败: ${e.message}`, true);
+    $('#deviceInfo').textContent = `错误: ${e.message}`;
+  }
+}
+
+$('#deviceSelect').addEventListener('change', (e) => {
+  if (e.target.value) {
+    const wasStreaming = isStreaming;
+    if (wasStreaming) stopStreaming();
+    startCamera(e.target.value).then(() => {
+      if (wasStreaming) startStreaming();
+    });
+  }
+});
+
+$('#resSelect').addEventListener('change', () => {
+  const deviceId = $('#deviceSelect').value;
+  if (deviceId) {
+    const wasStreaming = isStreaming;
+    if (wasStreaming) stopStreaming();
+    startCamera(deviceId).then(() => {
+      if (wasStreaming) startStreaming();
+    });
+  }
+});
+
+// ---- Video Streaming ----
+function formatSize(kb) {
+  if (kb < 1024) return kb + ' KB';
+  return (kb / 1024).toFixed(1) + ' MB';
+}
+
+function startStreaming() {
+  if (!videoStream) {
+    addSystemMessage('请先选择视频源', true);
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addSystemMessage('WebSocket 未连接', true);
+    return;
+  }
+
+  const mimeTypes = [
+    'video/webm;codecs=vp9',
+    'video/webm;codecs=vp8',
+    'video/webm',
+    'video/mp4',
+  ];
+  streamMime = '';
+  for (const m of mimeTypes) {
+    if (MediaRecorder.isTypeSupported(m)) {
+      streamMime = m;
+      break;
+    }
+  }
+  if (!streamMime) {
+    addSystemMessage('浏览器不支持视频录制格式', true);
+    return;
+  }
+
+  ws.send(JSON.stringify({ type: 'set_mime', mime: streamMime.split(';')[0] }));
+  initMediaRecorder();
+
+  isStreaming = true;
+  streamStartTime = Date.now();
+  $('#btnStream').textContent = '■ 停止视频流';
+  $('#btnStream').classList.add('active');
+  $('#streamIndicator').style.display = '';
+  setStatus('streaming', '视频流传输中');
+  updateBadge();
+
+  streamTimerInterval = setInterval(updateStreamTimer, 500);
+  addSystemMessage(`视频流已开启 (${streamMime.split(';')[0]})，输入问题即可分析`);
+  startDiffEngine();
+}
+
+function initMediaRecorder() {
+  const bitrate = parseInt($('#bitrate').value) || 1000000;
+  const gen = ++recorderGeneration;
+
+  try {
+    mediaRecorder = new MediaRecorder(videoStream, {
+      mimeType: streamMime,
+      videoBitsPerSecond: bitrate,
+    });
+  } catch (e) {
+    addSystemMessage(`创建 MediaRecorder 失败: ${e.message}`, true);
+    return;
+  }
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (gen !== recorderGeneration) return;
+    if (e.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+      e.data.arrayBuffer().then(buf => {
+        if (gen !== recorderGeneration) return;
+        ws.send(buf);
+      });
+    }
+  };
+
+  mediaRecorder.onerror = (e) => {
+    console.error('MediaRecorder error:', e);
+  };
+
+  mediaRecorder.start(1000);
+}
+
+function stopStreaming() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+  mediaRecorder = null;
+  isStreaming = false;
+
+  $('#btnStream').textContent = '▶ 开启视频流';
+  $('#btnStream').classList.remove('active');
+  $('#streamIndicator').style.display = 'none';
+  setStatus('connected', '已连接');
+
+  if (streamTimerInterval) {
+    clearInterval(streamTimerInterval);
+    streamTimerInterval = null;
+  }
+
+  updateBadge();
+  stopDiffEngine();
+  addSystemMessage('视频流已停止');
+}
+
+function restartMediaRecorder() {
+  if (!isStreaming || !videoStream) return;
+  recorderGeneration++;
+
+  if (mediaRecorder) {
+    mediaRecorder.ondataavailable = null;
+    if (mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+    }
+    mediaRecorder = null;
+  }
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'set_mime', mime: streamMime.split(';')[0] }));
+  }
+
+  setTimeout(() => {
+    if (isStreaming && videoStream) {
+      streamStartTime = Date.now();
+      initMediaRecorder();
+    }
+  }, 300);
+}
+
+function updateStreamTimer() {
+  if (!isStreaming) return;
+  const elapsed = Math.floor((Date.now() - streamStartTime) / 1000);
+  const m = Math.floor(elapsed / 60);
+  const s = elapsed % 60;
+  $('#streamDuration').textContent = `${m}:${s.toString().padStart(2, '0')}`;
+  $('#statDuration').textContent = elapsed + 's';
+}
+
+function updateBadge() {
+  const badge = $('#inputBadge');
+  if (isStreaming) {
+    badge.textContent = '● 推流中';
+    badge.classList.add('active');
+  } else {
+    badge.textContent = '停止';
+    badge.classList.remove('active');
+  }
+}
+
+// ---- Send query ----
+function sendQuery(text, options = {}) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addSystemMessage('WebSocket 未连接', true);
+    return;
+  }
+
+  const id = `q${Date.now()}`;
+  const payload = {
+    type: 'query',
+    text: text,
+    system_prompt: $('#systemPrompt').value,
+    scene_threshold: parseFloat($('#sceneThreshold').value),
+    min_interval: parseFloat($('#minInterval').value),
+    activity_events: activityEvents,
+    id: id,
+  };
+  if (options.noHistory) payload.no_history = true;
+  addUserMessage(text);
+  ws.send(JSON.stringify(payload));
+}
+
+// ---- Controls ----
+$('#sceneThreshold').addEventListener('input', (e) => {
+  $('#sceneThresholdVal').textContent = e.target.value;
+});
+
+$('#minInterval').addEventListener('input', (e) => {
+  $('#minIntervalVal').textContent = e.target.value + 's';
+});
+
+$('#btnStream').addEventListener('click', () => {
+  if (isStreaming) {
+    stopStreaming();
+  } else {
+    startStreaming();
+  }
+});
+
+$('#btnClear').addEventListener('click', () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'clear_history' }));
+  }
+  $('#chatMessages').innerHTML = '';
+  requestCount = 0;
+  $('#statRequests').textContent = '0';
+});
+
+$('#chatInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    submitChat();
+  }
+});
+
+$('#btnSend').addEventListener('click', submitChat);
+
+function submitChat() {
+  const input = $('#chatInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  sendQuery(text);
+}
+
+// ---- Frame Diff Engine ----
+const DIFF_W = 320, DIFF_H = 180;
+const DIFF_INTERVAL = 500;
+const GRID_COLS = 16, GRID_ROWS = 9;
+const CHANGE_THRESH = 3;
+
+let diffCanvas, diffCtx;
+let diffTimerId = null;
+
+function startDiffEngine() {
+  if (!diffCanvas) {
+    diffCanvas = document.createElement('canvas');
+    diffCanvas.width = DIFF_W;
+    diffCanvas.height = DIFF_H;
+    diffCtx = diffCanvas.getContext('2d', { willReadFrequently: true });
+  }
+  prevImageData = null;
+  activityEvents = [];
+  updateEventCount();
+  clearEventLog();
+  diffTimerId = setInterval(diffAnalyze, DIFF_INTERVAL);
+}
+
+function stopDiffEngine() {
+  if (diffTimerId) { clearInterval(diffTimerId); diffTimerId = null; }
+  const al = $('#activityLevel');
+  if (al) { al.textContent = '—'; al.style.color = 'var(--text2)'; }
+}
+
+function diffAnalyze() {
+  if (!isStreaming) return;
+  const v = $('#video');
+  if (!v || v.videoWidth === 0 || v.readyState < 2) return;
+
+  diffCtx.drawImage(v, 0, 0, DIFF_W, DIFF_H);
+  const cur = diffCtx.getImageData(0, 0, DIFF_W, DIFF_H);
+  if (!prevImageData) { prevImageData = cur; return; }
+
+  const cd = cur.data, pd = prevImageData.data;
+  const bw = Math.floor(DIFF_W / GRID_COLS), bh = Math.floor(DIFF_H / GRID_ROWS);
+  let totalDiff = 0, changedBlocks = 0;
+  const hot = [];
+
+  for (let gy = 0; gy < GRID_ROWS; gy++) {
+    for (let gx = 0; gx < GRID_COLS; gx++) {
+      let bd = 0, cnt = 0;
+      const sx = gx * bw, sy = gy * bh;
+      for (let y = sy; y < sy + bh && y < DIFF_H; y++) {
+        for (let x = sx; x < sx + bw && x < DIFF_W; x++) {
+          const i = (y * DIFF_W + x) * 4;
+          bd += (Math.abs(cd[i]-pd[i]) + Math.abs(cd[i+1]-pd[i+1]) + Math.abs(cd[i+2]-pd[i+2])) / 3;
+          cnt++;
+        }
+      }
+      const avg = bd / cnt;
+      totalDiff += avg;
+      if (avg > 10) { changedBlocks++; hot.push({x:gx, y:gy, d:avg}); }
+    }
+  }
+
+  const avgDiff = totalDiff / (GRID_COLS * GRID_ROWS);
+  const ratio = changedBlocks / (GRID_COLS * GRID_ROWS);
+
+  const al = $('#activityLevel');
+  if (avgDiff < CHANGE_THRESH) {
+    al.textContent = '静止'; al.style.color = 'var(--text2)';
+  } else if (ratio < 0.15) {
+    al.textContent = '微动'; al.style.color = 'var(--orange)';
+  } else {
+    al.textContent = '活跃'; al.style.color = 'var(--green)';
+  }
+
+  prevImageData = cur;
+  if (avgDiff < CHANGE_THRESH) return;
+
+  const t = streamStartTime ? (Date.now() - streamStartTime) / 1000 : 0;
+  let type, desc;
+  const region = regionDesc(hot);
+  if (ratio < 0.05) {
+    type = 'micro'; desc = `微小变化 ${region}`;
+  } else if (ratio < 0.15) {
+    type = 'local'; desc = `局部变化 ${region} (${(ratio*100)|0}%画面)`;
+  } else if (ratio < 0.45) {
+    type = 'partial'; desc = `区域变化 ${region} (${(ratio*100)|0}%画面)`;
+  } else if (ratio < 0.8) {
+    type = 'major'; desc = `大面积变化 ${region} (${(ratio*100)|0}%画面)`;
+  } else {
+    type = 'switch'; desc = `全屏变化 (${(ratio*100)|0}%画面)`;
+  }
+
+  const ev = {
+    t: +t.toFixed(1), type, intensity: +avgDiff.toFixed(1),
+    ratio: +ratio.toFixed(3), desc
+  };
+  activityEvents.push(ev);
+  // Push event to server for timed tasks
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'activity_event', event: ev }));
+  }
+  updateEventCount();
+  appendEventToLog(ev);
+}
+
+function regionDesc(hot) {
+  if (!hot.length) return '';
+  let xMin = Infinity, xMax = -1, yMin = Infinity, yMax = -1;
+  let wxSum = 0, wySum = 0, wSum = 0;
+  for (const h of hot) {
+    if (h.x < xMin) xMin = h.x;
+    if (h.x > xMax) xMax = h.x;
+    if (h.y < yMin) yMin = h.y;
+    if (h.y > yMax) yMax = h.y;
+    wxSum += h.x * h.d;
+    wySum += h.y * h.d;
+    wSum += h.d;
+  }
+  const cx = ((wxSum / wSum + 0.5) / GRID_COLS * 100) | 0;
+  const cy = ((wySum / wSum + 0.5) / GRID_ROWS * 100) | 0;
+  const x1 = (xMin / GRID_COLS * 100) | 0;
+  const y1 = (yMin / GRID_ROWS * 100) | 0;
+  const x2 = ((xMax + 1) / GRID_COLS * 100) | 0;
+  const y2 = ((yMax + 1) / GRID_ROWS * 100) | 0;
+  const w = x2 - x1, h = y2 - y1;
+  if (hot.length <= 3 && w < 20 && h < 20) {
+    return `在(${cx}%,${cy}%)`;
+  }
+  return `在(${cx}%,${cy}%) 范围${x1}%-${x2}%×${y1}%-${y2}%`;
+}
+
+function updateEventCount() {
+  const n = activityEvents.length;
+  const el = $('#eventCount');
+  if (el) el.textContent = n + ' 事件';
+  const hdr = $('#eventCountHeader');
+  if (hdr) hdr.textContent = n;
+}
+
+const TYPE_LABELS = {
+  micro: '微变', local: '局部', partial: '区域', major: '大变', switch: '全屏'
+};
+
+function appendEventToLog(ev) {
+  const log = $('#eventLog');
+  if (!log) return;
+  const empty = log.querySelector('.event-log-empty');
+  if (empty) empty.remove();
+  const div = document.createElement('div');
+  div.className = 'ev';
+  const tLabel = TYPE_LABELS[ev.type] || ev.type;
+  div.innerHTML = `<span class="ev-t">${ev.t.toFixed(1)}s</span>`
+    + `<span class="ev-type ${ev.type}">${tLabel}</span>`
+    + `<span class="ev-desc">${escapeHTML(ev.desc)}</span>`;
+  log.appendChild(div);
+  log.scrollTop = log.scrollHeight;
+}
+
+function clearEventLog() {
+  const log = $('#eventLog');
+  if (log) log.innerHTML = '<div class="event-log-empty">开启视频流后，检测到的画面变化会实时显示在这里</div>';
+}
+
+// ---- WS Multi-Task Management ----
+function refreshWsTasks() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'list_tasks' }));
+  }
+}
+
+function renderWsTaskList(taskArr) {
+  const list = $('#taskList');
+  $('#taskBadge').textContent = taskArr.length;
+
+  if (taskArr.length === 0) {
+    list.innerHTML = '<div class="task-empty">无运行中的任务</div>';
+    return;
+  }
+  list.innerHTML = '';
+  taskArr.forEach(t => {
+    const div = document.createElement('div');
+    div.className = 'task-item';
+    const dotClass = t.running ? 'running' : 'stopped';
+    const prompt = (t.prompt || '').slice(0, 20);
+    div.innerHTML = `
+      <div class="task-dot ${dotClass}"></div>
+      <div class="task-info">
+        <div class="task-id">${escapeHTML(t.task_id)}</div>
+        <div class="task-meta">${t.interval}s · ${escapeHTML(prompt)}</div>
+      </div>
+      <button class="btn-task-del" data-id="${escapeHTML(t.task_id)}" title="停止并删除">✕</button>
+    `;
+    list.appendChild(div);
+  });
+  list.querySelectorAll('.btn-task-del').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.id;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'delete_task', task_id: id }));
+      }
+    });
+  });
+}
+
+$('#btnCreateTask').addEventListener('click', () => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    addSystemMessage('WebSocket 未连接', true);
+    return;
+  }
+  if (!isStreaming) {
+    addSystemMessage('请先开启视频流', true);
+    return;
+  }
+  const interval = parseInt($('#taskInterval').value) || 30;
+  const prompt = $('#taskPrompt').value.trim() || '请描述当前画面中的内容和变化。';
+  const systemPrompt = $('#systemPrompt').value.trim();
+  const sceneThreshold = parseFloat($('#sceneThreshold').value);
+  const minInterval = parseFloat($('#minInterval').value);
+
+  ws.send(JSON.stringify({
+    type: 'create_task',
+    interval: interval,
+    prompt: prompt,
+    system_prompt: systemPrompt,
+    scene_threshold: sceneThreshold,
+    min_interval: minInterval,
+  }));
+});
+
+// ---- Storage Panel ----
+function formatBytes(bytes) {
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  return (bytes / 1024 / 1024).toFixed(1) + ' MB';
+}
+
+async function refreshStorage() {
+  try {
+    const [listResp, statsResp] = await Promise.all([
+      fetch('/api/minio/list?limit=50'),
+      fetch('/api/minio/stats'),
+    ]);
+    const list = await listResp.json();
+    const stats = await statsResp.json();
+
+    $('#storageCount').textContent = `${stats.count} 文件`;
+    $('#storageSize').textContent = formatBytes(stats.total_size);
+    $('#storageBadge').textContent = `${stats.count}`;
+
+    const container = $('#storageList');
+    if (!list.objects || list.objects.length === 0) {
+      container.innerHTML = '<div style="color:var(--text2);font-style:italic">暂无文件</div>';
+      return;
+    }
+
+    container.innerHTML = '';
+    list.objects.forEach(obj => {
+      const div = document.createElement('div');
+      div.className = 'storage-item';
+      const fname = obj.name.split('/').pop();
+      const mtime = obj.last_modified ? new Date(obj.last_modified).toLocaleString('zh-CN', {
+        month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit'
+      }) : '';
+      div.innerHTML = `<span class="si-name" title="${obj.name}">${fname}</span><span class="si-meta">${formatBytes(obj.size)} ${mtime}</span>`;
+      div.addEventListener('click', () => viewStorageFile(obj.name));
+      container.appendChild(div);
+    });
+  } catch (e) {
+    console.error('Storage refresh error:', e);
+    $('#storageList').innerHTML = '<div style="color:var(--red)">加载失败</div>';
+  }
+}
+
+async function viewStorageFile(path) {
+  try {
+    const resp = await fetch(`/api/minio/read?path=${encodeURIComponent(path)}`);
+    const data = await resp.json();
+    if (data.error) {
+      alert(data.error);
+      return;
+    }
+    const viewer = $('#storageViewer');
+    $('#storageViewerName').textContent = path.split('/').pop();
+    $('#storageViewerContent').textContent = data.content;
+    viewer.style.display = 'block';
+  } catch (e) {
+    console.error('Storage read error:', e);
+  }
+}
+
+$('#btnRefreshStorage').addEventListener('click', refreshStorage);
+$('#btnCloseViewer').addEventListener('click', () => {
+  $('#storageViewer').style.display = 'none';
+});
+
+// ---- Init ----
+connectWS();
+loadDevices();
+refreshStorage();
+
+setInterval(() => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'ping' }));
+  }
+}, 30000);
+
+// Auto-refresh storage every 60s
+setInterval(refreshStorage, 60000);
+</script>
+</body>
+</html>
