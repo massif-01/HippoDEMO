@@ -81,12 +81,6 @@ struct AppSnapshot: Codable, Sendable {
     var statusMessage: String
     var currentSession: DemoSession?
     var sopCapture: SopCapture?
-    var highlightSegment: HighlightSegment?
-    var frontmostContext: ForegroundAXSnapshot?
-    var followUpPackage: FollowUpPackage?
-    var mailDraftInsertResult: MailDraftInsertResult?
-    var workerStatuses: [PlanWorkerStatus]?
-    var memoryContextChunks: [MemoryContextChunk]?
     var currentTask: ActiveTask?
     var skills: [SkillRecord]
     var services: [ServiceStatus]
@@ -96,12 +90,6 @@ struct AppSnapshot: Codable, Sendable {
         statusMessage: "Waiting for task",
         currentSession: nil,
         sopCapture: nil,
-        highlightSegment: nil,
-        frontmostContext: nil,
-        followUpPackage: nil,
-        mailDraftInsertResult: nil,
-        workerStatuses: [],
-        memoryContextChunks: [],
         currentTask: nil,
         skills: [],
         services: []
@@ -128,104 +116,6 @@ struct SopCapture: Codable, Sendable {
     var checkIn: String?
     var checkOut: String?
     var state: JarvisState
-}
-
-struct MemoryContextChunk: Identifiable, Codable, Equatable, Sendable {
-    var id: String
-    var sessionId: String?
-    var source: String
-    var startAt: String
-    var endAt: String
-    var content: String
-    var metadata: [String: JSONValue]
-    var createdAt: String?
-}
-
-struct ForegroundAXSnapshot: Codable, Equatable, Sendable {
-    var bundleId: String?
-    var appName: String?
-    var windowTitle: String?
-    var focusedElement: String?
-    var visibleText: String
-    var treeMarkdown: String
-    var editableFields: [JSONValue]
-    var targetSurface: CuaTargetSurface?
-    var capturedAt: String?
-    var metadata: [String: JSONValue]
-
-    static let empty = ForegroundAXSnapshot(
-        bundleId: nil,
-        appName: nil,
-        windowTitle: nil,
-        focusedElement: nil,
-        visibleText: "",
-        treeMarkdown: "",
-        editableFields: [],
-        targetSurface: nil,
-        capturedAt: nil,
-        metadata: [:]
-    )
-}
-
-struct HighlightSegment: Identifiable, Codable, Equatable, Sendable {
-    var id: String
-    var checkIn: String?
-    var checkOut: String?
-    var status: String
-    var sourceSessionId: String?
-    var contextPriority: String?
-    var generatedSkillId: String?
-    var contextChunkIds: [String]
-    var error: String?
-}
-
-struct FollowUpPackage: Identifiable, Codable, Equatable, Sendable {
-    var id: String
-    var subject: String
-    var body: String
-    var minutesPath: String?
-    var contextPriority: String
-    var sourceSessionId: String?
-    var contextChunkIds: [String]
-    var createdAt: String?
-    var metadata: [String: JSONValue]
-}
-
-struct MailDraftInsertResult: Codable, Equatable, Sendable {
-    var ok: Bool
-    var detail: String
-    var targetSurface: CuaTargetSurface?
-    var insertedAt: String?
-    var metadata: [String: JSONValue]
-}
-
-struct PlanWorkerStatus: Identifiable, Codable, Equatable, Sendable {
-    var name: String
-    var status: String
-    var detail: String?
-    var startedAt: String?
-    var updatedAt: String?
-    var metadata: [String: JSONValue]
-
-    var id: String { name }
-}
-
-struct PlanStatus: Codable, Equatable, Sendable {
-    var highlightSegment: HighlightSegment?
-    var frontmostContext: ForegroundAXSnapshot?
-    var followUpPackage: FollowUpPackage?
-    var mailDraftInsertResult: MailDraftInsertResult?
-    var workerStatuses: [PlanWorkerStatus]
-    var memoryContextChunks: [MemoryContextChunk]
-
-    static let empty = PlanStatus(
-        highlightSegment: nil,
-        frontmostContext: nil,
-        followUpPackage: nil,
-        mailDraftInsertResult: nil,
-        workerStatuses: [],
-        memoryContextChunks: []
-    )
 }
 
 struct ActiveTask: Identifiable, Codable, Sendable {
@@ -389,6 +279,50 @@ struct OwnscribeConfigRequest: Codable, Sendable {
     var apiKey: String?
 }
 
+struct VlmacConfig: Codable, Equatable, Sendable {
+    var baseUrl: String?
+    var host: String?
+    var port: Int?
+    var vlmacDir: String?
+    var bundledRuntimePath: String?
+    var devRuntimePath: String?
+    var pythonPath: String?
+    var projectPath: String?
+    var storage: String?
+    var vlmProvider: String?
+    var vlmBaseUrl: String?
+    var vlmModel: String?
+    var vlmApiKeyConfigured: Bool?
+    var providerConfigPath: String?
+    var logPath: String?
+    var pidPath: String?
+
+    static let empty = VlmacConfig(
+        baseUrl: nil,
+        host: nil,
+        port: nil,
+        vlmacDir: nil,
+        bundledRuntimePath: nil,
+        devRuntimePath: nil,
+        pythonPath: nil,
+        projectPath: nil,
+        storage: nil,
+        vlmProvider: nil,
+        vlmBaseUrl: nil,
+        vlmModel: nil,
+        vlmApiKeyConfigured: false,
+        providerConfigPath: nil,
+        logPath: nil,
+        pidPath: nil
+    )
+}
+
+struct VlmacConfigRequest: Codable, Sendable {
+    var vlmBaseUrl: String?
+    var vlmModel: String?
+    var vlmApiKey: String?
+}
+
 struct OwnscribeAudioDevice: Identifiable, Codable, Equatable, Sendable {
     var name: String
     var isDefault: Bool
@@ -422,163 +356,6 @@ struct OwnscribePreflightCheck: Identifiable, Codable, Equatable, Sendable {
     var detail: String
 
     var id: String { name }
-}
-
-struct OpenChronicleModelConfig: Codable, Equatable, Sendable {
-    var stage: String?
-    var model: String?
-    var baseUrl: String?
-    var apiKeyEnv: String?
-    var apiKeyConfigured: Bool?
-    var maxTokens: Int?
-    var configPath: String?
-    var configExists: Bool?
-    var restartRequired: Bool?
-
-    static let empty = OpenChronicleModelConfig(
-        stage: "default",
-        model: nil,
-        baseUrl: nil,
-        apiKeyEnv: "OPENAI_API_KEY",
-        apiKeyConfigured: false,
-        maxTokens: nil,
-        configPath: nil,
-        configExists: nil,
-        restartRequired: nil
-    )
-}
-
-struct OpenChronicleModelConfigUpdateRequest: Codable, Sendable {
-    var stage: String?
-    var model: String?
-    var baseUrl: String?
-    var apiKeyEnv: String?
-    var apiKey: String?
-    var maxTokens: Int?
-}
-
-struct VlmacConfig: Codable, Equatable, Sendable {
-    var serviceBaseUrl: String?
-    var vllmBaseUrl: String?
-    var vllmModel: String?
-    var vllmApiKeyConfigured: Bool?
-    var temperature: Double?
-    var maxTokens: Int?
-    var timeoutSeconds: Double?
-    var configPath: String?
-    var envPath: String?
-    var envExists: Bool?
-    var restartRequired: Bool?
-
-    static let empty = VlmacConfig(
-        serviceBaseUrl: nil,
-        vllmBaseUrl: nil,
-        vllmModel: nil,
-        vllmApiKeyConfigured: false,
-        temperature: nil,
-        maxTokens: nil,
-        timeoutSeconds: nil,
-        configPath: nil,
-        envPath: nil,
-        envExists: nil,
-        restartRequired: nil
-    )
-}
-
-struct VlmacConfigUpdateRequest: Codable, Sendable {
-    var serviceBaseUrl: String?
-    var vllmBaseUrl: String?
-    var vllmModel: String?
-    var vllmApiKey: String?
-    var temperature: Double?
-    var maxTokens: Int?
-    var timeoutSeconds: Double?
-}
-
-struct BasicMemoryEmbeddingConfig: Codable, Equatable, Sendable {
-    var configPath: String?
-    var configExists: Bool?
-    var projectPath: String?
-    var defaultProject: String?
-    var semanticSearchEnabled: Bool?
-    var semanticEmbeddingProvider: String?
-    var semanticEmbeddingModel: String?
-    var semanticEmbeddingBaseUrl: String?
-    var semanticEmbeddingApiKeyEnv: String?
-    var semanticEmbeddingApiKeyConfigured: Bool?
-    var semanticEmbeddingDimensions: Int?
-    var semanticEmbeddingBatchSize: Int?
-    var semanticEmbeddingRequestConcurrency: Int?
-    var semanticEmbeddingTimeout: Double?
-    var restartRequired: Bool?
-
-    static let empty = BasicMemoryEmbeddingConfig(
-        configPath: nil,
-        configExists: nil,
-        projectPath: nil,
-        defaultProject: nil,
-        semanticSearchEnabled: nil,
-        semanticEmbeddingProvider: nil,
-        semanticEmbeddingModel: nil,
-        semanticEmbeddingBaseUrl: nil,
-        semanticEmbeddingApiKeyEnv: nil,
-        semanticEmbeddingApiKeyConfigured: false,
-        semanticEmbeddingDimensions: nil,
-        semanticEmbeddingBatchSize: nil,
-        semanticEmbeddingRequestConcurrency: nil,
-        semanticEmbeddingTimeout: nil,
-        restartRequired: nil
-    )
-}
-
-struct BasicMemoryEmbeddingConfigUpdateRequest: Codable, Sendable {
-    var semanticSearchEnabled: Bool?
-    var semanticEmbeddingProvider: String?
-    var semanticEmbeddingModel: String?
-    var semanticEmbeddingBaseUrl: String?
-    var semanticEmbeddingApiKey: String?
-    var semanticEmbeddingApiKeyEnv: String?
-    var semanticEmbeddingDimensions: Int?
-    var semanticEmbeddingBatchSize: Int?
-    var semanticEmbeddingRequestConcurrency: Int?
-    var semanticEmbeddingTimeout: Double?
-}
-
-struct ProjectCortexConfig: Codable, Equatable, Sendable {
-    var useReal: Bool?
-    var serviceBaseUrl: String?
-    var openaiBaseUrl: String?
-    var openaiModel: String?
-    var openaiApiKeyConfigured: Bool?
-    var temperature: Double?
-    var maxTokens: Int?
-    var timeoutSeconds: Double?
-    var configPath: String?
-    var configExists: Bool?
-
-    static let empty = ProjectCortexConfig(
-        useReal: false,
-        serviceBaseUrl: nil,
-        openaiBaseUrl: nil,
-        openaiModel: nil,
-        openaiApiKeyConfigured: false,
-        temperature: nil,
-        maxTokens: nil,
-        timeoutSeconds: nil,
-        configPath: nil,
-        configExists: nil
-    )
-}
-
-struct ProjectCortexConfigUpdateRequest: Codable, Sendable {
-    var useReal: Bool?
-    var serviceBaseUrl: String?
-    var openaiBaseUrl: String?
-    var openaiModel: String?
-    var openaiApiKey: String?
-    var temperature: Double?
-    var maxTokens: Int?
-    var timeoutSeconds: Double?
 }
 
 struct RecordingTimeline: Codable, Equatable, Sendable {
@@ -705,6 +482,227 @@ struct AiManusStatus: Codable, Equatable, Sendable {
     var config: AiManusConfig?
 
     static let empty = AiManusStatus(ok: false, status: "unknown", detail: nil, config: nil)
+}
+
+struct BasicMemoryConfig: Codable, Equatable, Sendable {
+    var enabled: Bool?
+    var status: String?
+    var project: String?
+    var home: String?
+    var projectPath: String?
+    var configPath: String?
+    var bundledRuntimePath: String?
+    var devRuntimePath: String?
+    var runtimeKind: String?
+    var runtimePath: String?
+    var runtimeDetail: String?
+    var commandDescription: String?
+    var toolsAvailable: Bool?
+    var detail: String?
+
+    static let empty = BasicMemoryConfig(
+        enabled: false,
+        status: "unknown",
+        project: nil,
+        home: nil,
+        projectPath: nil,
+        configPath: nil,
+        bundledRuntimePath: nil,
+        devRuntimePath: nil,
+        runtimeKind: nil,
+        runtimePath: nil,
+        runtimeDetail: nil,
+        commandDescription: nil,
+        toolsAvailable: nil,
+        detail: nil
+    )
+}
+
+struct BasicMemoryStatus: Codable, Sendable {
+    var ok: Bool?
+    var status: String
+    var detail: String?
+    var project: String?
+    var projectPath: String?
+    var notesCount: Int?
+    var entitiesCount: Int?
+    var observationsCount: Int?
+    var syncStatus: String?
+    var service: ServiceStatus?
+
+    static let empty = BasicMemoryStatus(
+        ok: false,
+        status: "unknown",
+        detail: nil,
+        project: nil,
+        projectPath: nil,
+        notesCount: nil,
+        entitiesCount: nil,
+        observationsCount: nil,
+        syncStatus: nil,
+        service: nil
+    )
+}
+
+struct BasicMemorySearchResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var query: String?
+    var results: [BasicMemorySearchResult]
+    var detail: String?
+    var elapsedMs: Double?
+
+    static let empty = BasicMemorySearchResponse(ok: false, query: nil, results: [], detail: nil, elapsedMs: nil)
+}
+
+struct BasicMemorySearchResult: Identifiable, Codable, Equatable, Sendable {
+    var identifier: String?
+    var title: String?
+    var path: String?
+    var type: String?
+    var score: Double?
+    var snippet: String?
+    var content: String?
+    var permalink: String?
+    var metadata: [String: JSONValue]?
+
+    var id: String {
+        identifier ?? path ?? permalink ?? title ?? snippet ?? "basic-memory-search-result"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case identifier = "id"
+        case title
+        case path
+        case type
+        case score
+        case snippet
+        case content
+        case permalink
+        case metadata
+    }
+}
+
+struct BasicMemoryRecentResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var notes: [BasicMemoryNote]?
+    var items: [BasicMemoryNote]?
+    var detail: String?
+
+    var resolvedNotes: [BasicMemoryNote] { notes ?? items ?? [] }
+
+    static let empty = BasicMemoryRecentResponse(ok: false, notes: [], items: nil, detail: nil)
+}
+
+struct BasicMemoryNote: Identifiable, Codable, Equatable, Sendable {
+    var identifier: String?
+    var title: String?
+    var path: String?
+    var content: String?
+    var summary: String?
+    var kind: String?
+    var permalink: String?
+    var createdAt: String?
+    var updatedAt: String?
+    var frontmatter: [String: JSONValue]?
+    var metadata: [String: JSONValue]?
+
+    var id: String {
+        identifier ?? path ?? permalink ?? title ?? "basic-memory-note"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case identifier = "id"
+        case title
+        case path
+        case content
+        case summary
+        case kind
+        case permalink
+        case createdAt
+        case updatedAt
+        case frontmatter
+        case metadata
+    }
+}
+
+struct BasicMemoryNotePreviewRequest: Codable, Sendable {
+    var identifier: String?
+    var path: String?
+    var permalink: String?
+}
+
+struct BasicMemorySyncResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var status: String?
+    var detail: String?
+    var path: String?
+    var permalink: String?
+    var note: BasicMemoryNote?
+    var fragmentId: String?
+    var createdCount: Int?
+    var updatedCount: Int?
+    var syncedNotes: [BasicMemoryNote]?
+
+    static let empty = BasicMemorySyncResponse(
+        ok: false,
+        status: nil,
+        detail: nil,
+        path: nil,
+        permalink: nil,
+        note: nil,
+        fragmentId: nil,
+        createdCount: nil,
+        updatedCount: nil,
+        syncedNotes: nil
+    )
+}
+
+struct ContextFragment: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var sessionId: String?
+    var modality: String?
+    var source: String?
+    var text: String?
+    var startedAt: String?
+    var endedAt: String?
+    var sequence: Int?
+    var confidence: Double?
+    var metadata: [String: JSONValue]?
+    var syncedAt: String?
+}
+
+struct ContextFragmentsResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var fragments: [ContextFragment]?
+    var items: [ContextFragment]?
+    var detail: String?
+
+    var resolvedFragments: [ContextFragment] { fragments ?? items ?? [] }
+
+    static let empty = ContextFragmentsResponse(ok: false, fragments: [], items: nil, detail: nil)
+
+    init(ok: Bool?, fragments: [ContextFragment]?, items: [ContextFragment]?, detail: String?) {
+        self.ok = ok
+        self.fragments = fragments
+        self.items = items
+        self.detail = detail
+    }
+
+    init(from decoder: Decoder) throws {
+        if let fragments = try? [ContextFragment](from: decoder) {
+            self.ok = true
+            self.fragments = fragments
+            self.items = nil
+            self.detail = nil
+            return
+        }
+
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        ok = try container.decodeIfPresent(Bool.self, forKey: .ok)
+        fragments = try container.decodeIfPresent([ContextFragment].self, forKey: .fragments)
+        items = try container.decodeIfPresent([ContextFragment].self, forKey: .items)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+    }
 }
 
 struct ManusThread: Identifiable, Codable, Equatable, Sendable {

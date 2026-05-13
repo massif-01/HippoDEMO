@@ -345,6 +345,12 @@ struct ActivityCenterView: View {
     }
 
     private func icon(for event: EventRecord) -> String {
+        if event.type.hasPrefix("context_fragment") {
+            return "text.bubble"
+        }
+        if event.type.hasPrefix("ownscribe_context_worker") {
+            return "waveform.and.mic"
+        }
         if event.type.contains("task") {
             return "bolt.circle"
         }
@@ -360,6 +366,12 @@ struct ActivityCenterView: View {
     private func color(for event: EventRecord) -> Color {
         if event.type.contains("error") {
             return .red
+        }
+        if event.type.hasPrefix("context_fragment") {
+            return .cyan
+        }
+        if event.type.hasPrefix("ownscribe_context_worker") {
+            return .green
         }
         if event.type.contains("task") {
             return .blue
@@ -429,7 +441,23 @@ struct ActivityCenterView: View {
 
 private extension EventRecord {
     var typeLabel: String {
-        type.replacingOccurrences(of: "_", with: " ").capitalized
+        switch type {
+        case "context_fragment_created":
+            return "Context Fragment Created"
+        case "context_fragment_synced":
+            return "Context Fragment Synced"
+        case "context_fragment_sync_failed":
+            return "Context Fragment Sync Failed"
+        case "ownscribe_context_worker_started":
+            return "Voice Context Worker Started"
+        case "ownscribe_context_worker_stopped":
+            return "Voice Context Worker Stopped"
+        case "ownscribe_context_worker_error":
+            return "Voice Context Worker Error"
+        default:
+            break
+        }
+        return type.replacingOccurrences(of: "_", with: " ").capitalized
     }
 
     var shortTime: String {

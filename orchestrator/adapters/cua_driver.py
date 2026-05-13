@@ -201,34 +201,6 @@ class CuaDriverAdapter:
         await asyncio.sleep(0.3)
         return await self.start_daemon()
 
-    async def permission_status(self, *, prompt: bool = False) -> dict[str, Any]:
-        executable = self.executable()
-        if not executable:
-            return {
-                "ok": False,
-                "accessibility": False,
-                "screen_recording": False,
-                "detail": "cua-driver binary not found",
-            }
-
-        daemon_ok, daemon_detail = await self._daemon_status(executable)
-        if not daemon_ok:
-            return {
-                "ok": False,
-                "accessibility": False,
-                "screen_recording": False,
-                "detail": f"cua-driver daemon is not running; {daemon_detail}",
-            }
-
-        result = await self._call_tool(executable, "check_permissions", {"prompt": prompt}, timeout=10.0)
-        detail = self._permission_detail(result)
-        return {
-            "ok": bool(result.get("ok")),
-            "accessibility": "Accessibility: granted" in detail,
-            "screen_recording": "Screen Recording: granted" in detail,
-            "detail": detail,
-        }
-
     async def target_surface(self) -> CuaTargetSurface:
         executable = self.executable()
         if not executable:
@@ -346,100 +318,6 @@ class CuaDriverAdapter:
             element_role=element_role,
         )
 
-    async def mail_compose_surface(self) -> CuaTargetSurface:
-        executable = self.executable()
-        if not executable:
-            return CuaTargetSurface(
-                status="unavailable",
-                mode="mail_compose",
-                reason="cua-driver binary not found; build cua/libs/cua-driver or set HIPPODEMO_CUA_DRIVER_BINARY",
-            )
-
-        daemon_ok, daemon_detail = await self._daemon_status(executable)
-        if not daemon_ok:
-            return CuaTargetSurface(
-                status="unavailable",
-                mode="mail_compose",
-                reason="cua-driver daemon is not running; start CuaDriver.app or cua-driver serve before Mail insertion",
-                detail=daemon_detail,
-            )
-
-        apps_result = await self._call_tool(executable, "list_apps", {}, timeout=10.0)
-        if not apps_result["ok"]:
-            return CuaTargetSurface(status="error", mode="mail_compose", reason=f"list_apps failed: {apps_result['detail']}")
-        apps = apps_result.get("payload", {}).get("apps") if isinstance(apps_result.get("payload"), dict) else None
-        mail = next(
-            (
-                app for app in apps or []
-                if self._running_app(app)
-                and app.get("bundle_id") == "com.apple.mail"
-                and bool(app.get("active"))
-            ),
-            None,
-        )
-        if not mail:
-            return CuaTargetSurface(
-                status="unsafe",
-                mode="mail_compose",
-                reason="Apple Mail is not the active frontmost app; open a Mail compose window before inserting.",
-            )
-
-        pid = int(mail["pid"])
-        base = {
-            "app_name": str(mail.get("name") or "Mail"),
-            "bundle_id": "com.apple.mail",
-            "pid": pid,
-            "detail": f"daemon={daemon_detail}; source=mail_compose",
-        }
-        windows_result = await self._call_tool(executable, "list_windows", {"pid": pid}, timeout=10.0)
-        if not windows_result["ok"]:
-            return CuaTargetSurface(**base, status="unsafe", mode="mail_compose", reason=f"list_windows failed: {windows_result['detail']}")
-        window = self._select_target_window(windows_result.get("payload"))
-        if not window:
-            return CuaTargetSurface(**base, status="unsafe", mode="mail_compose", reason="No on-screen Mail compose candidate found.")
-
-        window_id = int(window["window_id"])
-        window_title = str(window.get("title") or "")
-        state_result = await self._call_tool(
-            executable,
-            "get_window_state",
-            {"pid": pid, "window_id": window_id, "query": "AXText"},
-            timeout=DEFAULT_TIMEOUT_SECONDS,
-        )
-        window_base = {**base, "window_id": window_id, "window_title": window_title}
-        if not state_result["ok"]:
-            return CuaTargetSurface(**window_base, status="unsafe", mode="mail_compose", reason=f"get_window_state failed: {state_result['detail']}")
-
-        editable = self._first_editable_element(state_result.get("payload"))
-        if not editable:
-            return CuaTargetSurface(
-                **window_base,
-                status="unsafe",
-                mode="mail_compose",
-                reason="The active Mail window has no editable AX text field.",
-            )
-        element_index, element_role = editable
-        title = window_title.lower()
-        compose_title = any(marker in title for marker in ["new message", "compose", "新邮件", "撰写"])
-        if element_role != "AXTextArea" and not compose_title:
-            return CuaTargetSurface(
-                **window_base,
-                status="unsafe",
-                mode="mail_compose",
-                reason="The active Mail window does not look like a compose body surface.",
-                element_index=element_index,
-                element_role=element_role,
-            )
-        return CuaTargetSurface(
-            **window_base,
-            safe=True,
-            status="safe",
-            mode="mail_compose",
-            reason="Apple Mail compose surface is ready; insertion only fills the draft and never sends.",
-            element_index=element_index,
-            element_role=element_role,
-        )
-
     async def insert_text(self, text: str, surface_hint: CuaTargetSurface | None = None) -> CuaInsertResult:
         executable = self.executable()
         if not executable:
@@ -504,25 +382,6 @@ class CuaDriverAdapter:
             target_bundle_id=surface.bundle_id,
             text_chars=len(text),
         )
-
-    async def insert_mail_draft(self, *, subject: str, body: str) -> CuaInsertResult:
-        text = body.strip()
-        if subject.strip():
-            text = f"{subject.strip()}\n\n{text}" if text else subject.strip()
-        surface = await self.mail_compose_surface()
-        if not surface.safe:
-            return CuaInsertResult(
-                ok=False,
-                detail=f"Mail compose surface is not ready: {surface.reason}",
-                target_pid=surface.pid,
-                target_app=surface.app_name,
-                target_bundle_id=surface.bundle_id,
-                text_chars=len(text),
-            )
-        result = await self.insert_text(text, surface_hint=surface)
-        if result.ok:
-            result.detail = f"{result.detail}; mail_compose_only=true; send_action=false"
-        return result
 
     async def _daemon_status(self, executable: str) -> tuple[bool, str]:
         try:
@@ -745,8 +604,6 @@ class CuaDriverAdapter:
     def _usable_surface_hint(self, surface: CuaTargetSurface | None) -> bool:
         if surface is None or not surface.safe or surface.pid is None:
             return False
-        if surface.mode == "mail_compose" and surface.bundle_id == "com.apple.mail":
-            return surface.window_id is not None and surface.element_index is not None
         if not surface.bundle_id or surface.bundle_id in BLOCKED_TARGET_BUNDLES:
             return False
         if surface.bundle_id not in self._safe_bundle_ids():
@@ -771,19 +628,6 @@ class CuaDriverAdapter:
             except json.JSONDecodeError:
                 continue
         return None
-
-    def _permission_detail(self, result: dict[str, Any]) -> str:
-        payload = result.get("payload")
-        if isinstance(payload, dict):
-            content = payload.get("content")
-            if isinstance(content, list):
-                parts = []
-                for item in content:
-                    if isinstance(item, dict) and isinstance(item.get("text"), str):
-                        parts.append(item["text"])
-                if parts:
-                    return "\n".join(parts)
-        return str(result.get("detail") or "")
 
     def _summarize(self, text: str, *, max_chars: int = 900) -> str:
         lines = [line.strip() for line in text.splitlines() if line.strip()]

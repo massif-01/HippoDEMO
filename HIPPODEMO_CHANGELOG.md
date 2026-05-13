@@ -29,6 +29,16 @@ HippoDEMO 已经从“多个既有项目的能力组合设想”推进到一个�
 - Settings 的 `ai-manus Runtime` 控制台新增 `Start ai-manus`、`Restart`、`Stop`、`Logs` 按钮，并展示最近命令、pid、日志路径和尾部日志。
 - 验证：`python -m compileall orchestrator`、`swift build --product HippoJarvis`、`./script/build_and_run.sh --verify` 均通过；本轮没有点击 Start，因此没有启动 ai-manus Docker 栈。
 
+## 2026-05-14 Context Memory Pipeline
+
+- 新增 `ContextFragment`，把 Jarvis ON 期间的实时/准实时上下文从 session note 中拆出来，独立落盘到 `orchestrator/data/context/<session_id>/<modality>/chunks/`。
+- ownscribe 新增 voice context worker：Jarvis ON 后启动，按 20 秒窗口、3 秒 overlap 从有效 WAV segment 生成 voice context；Jarvis OFF 时停止 worker 并 flush 最后一段。
+- Context fragment 使用录音 timeline 的真实系统时间对齐，记录 `started_at`、`ended_at`、audio offset、segment path、ASR provider/model。
+- Basic Memory 新增 context 分区同步：voice context 写入 `hippo/context/voice/chunks`，ledger key 使用 `context:<fragment_id>`，不会污染 `hippo/sessions`。
+- 新增 Orchestrator API：`GET /context/recent`、`POST /integrations/basic-memory/sync-context/{fragment_id}`；事件流新增 `context_fragment_created/synced/sync_failed` 和 `ownscribe_context_worker_*`。
+- Swift 前端新增 Context Memory 后台状态：Settings 显示 voice producer、最近 fragment 时间、pending/synced 数量；Activity Center 展示 context events；状态栏只显示 Voice Context 服务灯和最近更新时间，不展示 transcript 正文。
+- 验证：`python -m compileall orchestrator`、`PYTHONPATH=. pytest orchestrator/tests/test_context_memory.py orchestrator/tests/test_basic_memory_adapter.py`、`swift build --product HippoJarvis`、`./script/build_and_run.sh --verify` 均通过；`GET /context/recent?modality=voice&limit=5` 返回空数组但接口可用。
+
 ## 初始项目调研
 
 工作目录下最初有多个独立项目，后来新增了 `cua`。我们先逐个梳理了各项目的前后端能力，并确认哪些能力进入主路径，哪些能力只作为后台设置或调试窗口。
@@ -1536,42 +1546,89 @@ swift build --product HippoJarvis
 - Hippo 本轮不手写 noVNC/WKWebView 客户端；Sandbox 打开 ai-manus 自己的 VNC/takeover 页面。
 - 本轮不做本机 CUA 与 ai-manus sandbox takeover 的双向同步；本机外部可见插入仍由 `cua-driver` 负责。
 
-## 2026-05-14 Runtime 依赖内置与模型配置收口
+## 2026-05-14 basic-memory v1：Hippo 专属记忆同步
 
 ### 实现内容
 
-- 新增项目内 runtime bootstrap：
-  - `script/bootstrap_runtimes.sh`
-  - 创建并维护 `.runtime/python`，作为 HippoJarvis/Orchestrator 的唯一 Python runtime。
-  - 构建阶段安装 Orchestrator、OpenChronicle、Basic Memory、vlmac、ownscribe recorder 所需依赖。
-  - ownscribe 只安装 Hippo 当前真实链路需要的 recorder + remote ASR/Summary 依赖，不拉 WhisperX / llama.cpp 本地模型路径。
-- `script/build_and_run.sh` 在构建 app 前自动执行 runtime bootstrap；`--restart-no-build` 只做 runtime check，不在用户启动路径里联网补依赖。
-- `OrchestratorLauncher` 改为强制使用 `.runtime/python/bin/python` 启动 uvicorn，并将 `.runtime/python/bin` 写入 PATH。
-- 状态栏 label 增加启动期 `store.bootstrap()`，避免只依赖 `AppDelegate` 生命周期导致菜单栏 app 已启动但 Orchestrator 未自动拉起。
-- OpenChronicle adapter 优先使用 `.runtime/python/bin/openchronicle`。
-- ownscribe adapter 优先使用 `.runtime/python/bin/python` 运行 recorder child process。
-- Settings 中模型配置收口：
-  - ownscribe ASR/Summary OpenAI-compatible provider 配置。
-  - OpenChronicle Writer 模型配置。
-  - vlmac VLM endpoint 配置。
-  - Basic Memory embedding 配置。
-- Basic Memory 的 OpenAI embedding provider factory 已接入 config 中的 `semantic_embedding_base_url`、`semantic_embedding_api_key`、`semantic_embedding_timeout`。
+- 新增 Orchestrator `basic-memory` adapter：
+  - 只通过 `uv run --project <HippoDEMO>/basic-memory bm ...` 调用 Basic Memory CLI。
+  - 固定注入 `BASIC_MEMORY_CONFIG_DIR=<HippoDEMO>/orchestrator/data/basic_memory/config`、`BASIC_MEMORY_NO_PROMOS=1`、`BASIC_MEMORY_LOG_LEVEL=ERROR`。
+  - 不读取或写入用户全局 `~/.basic-memory`，不启动 Basic Memory HTTP/MCP 长服务。
+  - `status` 支持 `uv`、repo、Python 3.12+、Hippo project setup 检查；不可用只更新 service detail，不阻断 `/state`。
+- 新增 Orchestrator API：
+  - `GET /integrations/basic-memory/config`
+  - `GET /integrations/basic-memory/status`
+  - `POST /integrations/basic-memory/setup`
+  - `GET /integrations/basic-memory/search?query=&limit=`
+  - `GET /integrations/basic-memory/recent?limit=`
+  - `GET /integrations/basic-memory/note/{identifier}`
+  - `POST /integrations/basic-memory/sync-session/{session_id}`
+  - `POST /integrations/basic-memory/sync-task/{task_id}`
+  - `POST /integrations/basic-memory/sync-skill/{skill_id}`
+- 写入策略：
+  - Basic Memory project 固定为 `hippo`，project path 为 `orchestrator/data/basic_memory/project`。
+  - note 目录固定为 `hippo/sessions`、`hippo/tasks`、`hippo/skills`。
+  - note 标题使用稳定源 ID：`Hippo Session <short_id>`、`Hippo Task <short_id>`、`Hippo Skill <short_id>`。
+  - `orchestrator/data/basic_memory/ledger.json` 做 `{kind}:{source_id}` 去重；命中则返回 `already_synced`，不覆盖已有 note。
+  - Active Task 完成后在 store lock 外 best-effort 同步 task/session；Skill 生成后在 lock 外 best-effort 同步 skill，失败只发 `basic_memory_sync_failed`，不回滚 Hippo 状态。
+  - session 同步不写入原始 transcript/audio/timeline，只写用户确认后的摘要、行动项、任务结果和 Skill 产物摘要。
+- Swift Settings Developer Console 新增 `basic-memory` 区块：
+  - 显示 service light、project/config 路径和 sync 状态。
+  - 提供 Setup、Refresh、Recent、Search、Sync Session、Sync Task、Sync Skill。
+  - 搜索结果与 note preview 仅放在 Settings 后台控制台，不进入状态栏 HUD。
+- 新增 backend 单测覆盖：
+  - Hippo 专属 env 注入。
+  - `uv` 缺失状态。
+  - `list-projects` JSON setup 验证。
+  - ledger duplicate skip。
+  - write-note conflict ledger 记录。
 
 ### 验证结果
 
+- `python -m pytest orchestrator/tests/test_basic_memory_adapter.py` 通过，5 tests passed。
 - `python -m compileall orchestrator` 通过。
-- `python -m compileall basic-memory/src/basic_memory/repository/embedding_provider_factory.py basic-memory/src/basic_memory/config.py vlmac/server.py` 通过。
-- FastAPI TestClient smoke：
-  - `/integrations/openchronicle/model-config`
-  - `/integrations/vlmac/config`
-  - `/integrations/basic-memory/embedding-config`
-  均返回 `200`。
-- `swift build --product HippoJarvis` 沙箱外通过；沙箱内仍受 SwiftPM/clang cache 权限限制。
-- `./script/build_and_run.sh --verify` 通过；打包后的 HippoJarvis 使用 `.runtime/python/bin/python` 拉起 Orchestrator，`/health` ready。
-- `git diff --check` 通过。
+- `swift build --product HippoJarvis` 通过。
+- `./script/build_and_run.sh --verify` 通过，`HippoJarvis` app process 与 Orchestrator `/health` 均 ready。
+- `GET /integrations/basic-memory/status` 可正常返回不可用状态；当前机器未安装 `uv`，因此 Basic Memory runtime 显示 `unavailable`，但 `/state` 正常返回。
 
 ### 当前边界
 
-- `.runtime/python` 是构建/打包产物，不进入 Git。
-- 首次构建需要联网安装 Python wheels；用户打开 app 时不应再安装依赖。
-- 如需分发独立 `.app`，后续 packaging 阶段需要把 `.runtime/python` 与 Python 动态库策略一起纳入 app bundle 或 installer。
+- v1 不接 Basic Memory Cloud，不做云同步。
+- v1 不启动 Basic Memory HTTP API 或 MCP 长连接。
+- 当前运行机未发现 `uv`；安装 `uv` 后可在 Settings 点击 `Setup` 创建 Hippo 专属 Basic Memory project。
+
+## 2026-05-14 basic-memory runtime resolver：移除用户路径上的 uv 要求
+
+### 实现内容
+
+- Basic Memory adapter 从“固定依赖 `uv`”改为 runtime resolver：
+  1. `HIPPODEMO_BASIC_MEMORY_BM` 显式指定的 runtime。
+  2. `orchestrator-runtime/bin/bm`，用于随 Hippo app 打包分发。
+  3. `.runtime/basic-memory-runtime/bin/bm`，用于本地开发生成的 Hippo runtime。
+  4. `basic-memory/.venv/bin/bm`，用于 basic-memory repo-local venv。
+  5. 当前 Orchestrator Python 可直接 import `basic_memory` 时，使用 `python -m basic_memory.cli.main`。
+  6. `uv run --project ./basic-memory bm` 只保留为开发 fallback。
+- `GET /integrations/basic-memory/config` 现在返回：
+  - `runtime_kind`
+  - `runtime_path`
+  - `runtime_detail`
+  - `bundled_runtime_path`
+  - `dev_runtime_path`
+  - `command_description`
+- Settings 的 `basic-memory` 控制台增加 Runtime 展示，不再把 `uv` 当作用户必须安装的前置条件。
+- 新增 `script/bootstrap_basic_memory_runtime.sh`：
+  - 用 Python 3.12+ 创建 `orchestrator-runtime`。
+  - 安装 `./basic-memory` 到该 runtime。
+  - 生成可随 app/项目分发的 `orchestrator-runtime/bin/bm`。
+
+### 验证结果
+
+- `bash -n script/bootstrap_basic_memory_runtime.sh` 通过。
+- `python -m pytest orchestrator/tests/test_basic_memory_adapter.py` 通过，7 tests passed。
+- `python -m compileall orchestrator` 通过。
+- `swift build --product HippoJarvis` 通过。
+
+### 当前边界
+
+- 本轮没有在线下载依赖并生成 `orchestrator-runtime`，因为这一步需要 pip 网络/缓存环境；脚本已就位，后续打包或开发机准备 runtime 时执行。
+- 在没有 bundled/dev/repo runtime 且没有 `uv` fallback 的机器上，Basic Memory 仍会显示 unavailable，但提示会指向缺少 Hippo runtime，而不是要求最终用户安装 `uv`。

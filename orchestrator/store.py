@@ -12,15 +12,10 @@ from .models import (
     AiManusThreadEvent,
     AiManusThreadMessage,
     Artifact,
+    ContextFragment,
     DemoSession,
-    FollowUpPackage,
-    ForegroundAXSnapshot,
-    HighlightSegment,
-    MailDraftInsertResult,
-    MemoryContextChunk,
     OrchestratorEvent,
     OrchestratorState,
-    PlanWorkerStatus,
     ServiceStatus,
     SkillRecord,
     now_iso,
@@ -34,7 +29,8 @@ SESSION_DIR = DATA_DIR / "sessions"
 SKILL_DIR = DATA_DIR / "skills"
 AI_MANUS_DIR = DATA_DIR / "ai_manus"
 AI_MANUS_THREAD_DIR = AI_MANUS_DIR / "threads"
-MEMORY_CONTEXT_DIR = DATA_DIR / "memory_context"
+BASIC_MEMORY_DIR = DATA_DIR / "basic_memory"
+CONTEXT_DIR = DATA_DIR / "context"
 
 
 def to_dict(model: Any) -> Dict[str, Any]:
@@ -94,11 +90,10 @@ class OrchestratorStore:
     def default_services() -> List[ServiceStatus]:
         return [
             ServiceStatus(name="ownscribe", status="available", detail="ownscribe adapter pending status refresh"),
+            ServiceStatus(name="voice-context", status="idle", detail="voice context worker idle"),
             ServiceStatus(name="ai-manus", status="available", detail="ai-manus adapter pending status refresh"),
-            ServiceStatus(name="basic-memory", status="available", detail="Basic Memory adapter pending status refresh"),
-            ServiceStatus(name="basic-memory-queue", status="idle", detail="Basic Memory write queue not started"),
+            ServiceStatus(name="basic-memory", status="available", detail="basic-memory adapter pending status refresh"),
             ServiceStatus(name="vlmac", status="available", detail="vlmac adapter pending status refresh"),
-            ServiceStatus(name="AX detector", status="idle", detail="Foreground AX detector not started"),
             ServiceStatus(name="OpenChronicle", status="available", detail="OpenChronicle CLI adapter pending status refresh"),
             ServiceStatus(name="cua-driver", status="available", detail="cua-driver adapter pending status refresh"),
             ServiceStatus(name="Project_Cortex", status="mock", detail="/api/sop_generator adapter disabled by default"),
@@ -141,44 +136,6 @@ class OrchestratorStore:
         await self.persist()
         return artifact
 
-    async def add_memory_context_chunk(self, chunk: MemoryContextChunk) -> MemoryContextChunk:
-        self.state.memory_context_chunks.append(chunk)
-        self.state.memory_context_chunks = self.state.memory_context_chunks[-200:]
-        path = MEMORY_CONTEXT_DIR / f"{chunk.id}_{chunk.source}.json"
-        write_json(path, to_dict(chunk))
-        await self.persist()
-        return chunk
-
-    async def set_frontmost_context(self, snapshot: ForegroundAXSnapshot) -> ForegroundAXSnapshot:
-        self.state.frontmost_context = snapshot
-        await self.persist()
-        return snapshot
-
-    async def set_highlight_segment(self, segment: HighlightSegment) -> HighlightSegment:
-        self.state.highlight_segment = segment
-        await self.persist()
-        return segment
-
-    async def set_follow_up_package(self, package: FollowUpPackage) -> FollowUpPackage:
-        self.state.follow_up_package = package
-        await self.persist()
-        return package
-
-    async def set_mail_draft_insert_result(self, result: MailDraftInsertResult) -> MailDraftInsertResult:
-        self.state.mail_draft_insert_result = result
-        await self.persist()
-        return result
-
-    async def set_worker_status(self, status: PlanWorkerStatus) -> PlanWorkerStatus:
-        for index, existing in enumerate(self.state.worker_statuses):
-            if existing.name.lower() == status.name.lower():
-                self.state.worker_statuses[index] = status
-                await self.persist()
-                return status
-        self.state.worker_statuses.append(status)
-        await self.persist()
-        return status
-
     async def add_active_task(self, task: ActiveTask) -> ActiveTask:
         self.state.active_tasks.insert(0, task)
         if self.state.current_session and task.source_session_id == self.state.current_session.id:
@@ -214,6 +171,58 @@ class OrchestratorStore:
             return removed
 
         raise KeyError(skill_id)
+
+    def _context_fragment_path(self, fragment: ContextFragment) -> Path:
+        return CONTEXT_DIR / fragment.session_id / fragment.modality / "chunks" / f"{fragment.id}.json"
+
+    async def save_context_fragment(self, fragment: ContextFragment) -> ContextFragment:
+        write_json(self._context_fragment_path(fragment), to_dict(fragment))
+        return fragment
+
+    def get_context_fragment(self, fragment_id: str) -> ContextFragment:
+        if not fragment_id:
+            raise KeyError(fragment_id)
+        for path in CONTEXT_DIR.glob(f"*/*/chunks/{fragment_id}.json"):
+            try:
+                return ContextFragment(**json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                continue
+        raise KeyError(fragment_id)
+
+    def list_context_fragments(
+        self,
+        *,
+        session_id: str | None = None,
+        modality: str | None = None,
+        limit: int = 50,
+    ) -> List[ContextFragment]:
+        safe_limit = max(1, min(limit, 200))
+        if session_id and modality:
+            paths = list((CONTEXT_DIR / session_id / modality / "chunks").glob("*.json"))
+        elif session_id:
+            paths = list((CONTEXT_DIR / session_id).glob("*/chunks/*.json"))
+        elif modality:
+            paths = list(CONTEXT_DIR.glob(f"*/{modality}/chunks/*.json"))
+        else:
+            paths = list(CONTEXT_DIR.glob("*/*/chunks/*.json"))
+
+        fragments: List[ContextFragment] = []
+        for path in paths:
+            try:
+                fragments.append(ContextFragment(**json.loads(path.read_text(encoding="utf-8"))))
+            except Exception:
+                continue
+        return sorted(
+            fragments,
+            key=lambda fragment: (fragment.started_at, fragment.sequence, fragment.id),
+            reverse=True,
+        )[:safe_limit]
+
+    async def mark_context_fragment_synced(self, fragment_id: str, synced_at: str | None = None) -> ContextFragment:
+        fragment = self.get_context_fragment(fragment_id)
+        fragment.synced_at = synced_at or now_iso()
+        await self.save_context_fragment(fragment)
+        return fragment
 
     def list_ai_manus_threads(self) -> List[AiManusThread]:
         if not AI_MANUS_THREAD_DIR.exists():

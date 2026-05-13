@@ -10,16 +10,20 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var ownscribeConfig: OwnscribeConfig = .empty
     @Published private(set) var ownscribeDevices: OwnscribeAudioDevicesResponse = .empty
     @Published private(set) var ownscribePreflight: OwnscribePreflight = .empty
-    @Published private(set) var openChronicleModelConfig: OpenChronicleModelConfig = .empty
-    @Published private(set) var vlmacConfig: VlmacConfig = .empty
-    @Published private(set) var basicMemoryEmbeddingConfig: BasicMemoryEmbeddingConfig = .empty
-    @Published private(set) var projectCortexConfig: ProjectCortexConfig = .empty
-    @Published private(set) var planStatus: PlanStatus = .empty
     @Published private(set) var cuaTargetSurface: CuaTargetSurface = .empty
     @Published private(set) var aiManusConfig: AiManusConfig = .empty
     @Published private(set) var aiManusStatus: AiManusStatus = .empty
     @Published private(set) var aiManusRuntimeLastCommand: AiManusRuntimeCommandResponse?
     @Published private(set) var aiManusRuntimeLogs: AiManusRuntimeLogsResponse = .empty
+    @Published private(set) var basicMemoryConfig: BasicMemoryConfig = .empty
+    @Published private(set) var basicMemoryStatus: BasicMemoryStatus = .empty
+    @Published private(set) var basicMemorySearch: BasicMemorySearchResponse = .empty
+    @Published private(set) var basicMemoryRecent: BasicMemoryRecentResponse = .empty
+    @Published private(set) var basicMemoryNotePreview: BasicMemoryNote?
+    @Published private(set) var basicMemoryLastSync: BasicMemorySyncResponse?
+    @Published private(set) var vlmacConfig: VlmacConfig = .empty
+    @Published private(set) var vlmacPreflight: JSONValue?
+    @Published private(set) var contextFragments: [ContextFragment] = []
     @Published private(set) var manusThreads: [ManusThread] = []
     @Published private(set) var currentManusThread: ManusThread?
     @Published private(set) var manusMessages: [ManusMessage] = []
@@ -34,6 +38,7 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var isLoadingManusFilePreview = false
     @Published private(set) var isLoadingManusFileDownloadLink = false
     @Published private(set) var isRunningAiManusRuntimeCommand = false
+    @Published private(set) var isRunningBasicMemoryCommand = false
     @Published private(set) var isBusy = false
     @Published var language: AppLanguage {
         didSet {
@@ -88,7 +93,7 @@ final class AppStateStore: ObservableObject {
     var manusConfig: AiManusConfig { aiManusConfig }
     var manusFiles: [ManusFileInfo] { manusFilesResponse.files }
     var canInsertCurrentTask: Bool {
-        guard let task = snapshot.currentTask, !isBusy else { return false }
+        guard let task = snapshot.currentTask, cuaTargetSurface.safe, !isBusy else { return false }
         let insertStatus = task.proposedActions.first?.status ?? "proposed"
         return !["inserted", "insert_requested"].contains(insertStatus)
     }
@@ -107,42 +112,9 @@ final class AppStateStore: ObservableObject {
         }
     }
 
-    func refreshPlan() async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            planStatus = try await client.plan()
-            applyPlanStatus(planStatus)
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
     func detectIntervention() async {
-        await run(refreshTargetSurface: false) {
-            try await self.client.detectIntervention()
-        }
-    }
-
-    func highlight() async {
         await run {
-            try await self.client.highlight()
-        }
-    }
-
-    func refreshFrontmost() async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            let frontmost = try await client.frontmost()
-            snapshot.frontmostContext = frontmost
-            planStatus.frontmostContext = frontmost
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
+            try await self.client.detectIntervention()
         }
     }
 
@@ -154,156 +126,6 @@ final class AppStateStore: ObservableObject {
             ownscribeConfig = try await client.ownscribeConfig()
             ownscribeDevices = try await client.ownscribeAudioDevices()
             ownscribePreflight = try await client.ownscribePreflight(network: networkPreflight)
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    func refreshProviderConsoles() async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            openChronicleModelConfig = try await client.openChronicleModelConfig()
-            vlmacConfig = try await client.vlmacConfig()
-            applyServiceStatus(try await client.vlmacStatus())
-            basicMemoryEmbeddingConfig = try await client.basicMemoryEmbeddingConfig()
-            applyServiceStatus(try await client.basicMemoryStatus())
-            projectCortexConfig = try await client.projectCortexConfig()
-            applyServiceStatus(try await client.projectCortexStatus())
-            snapshot = try await client.state()
-            applyPlanFields(from: snapshot)
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    func updateOpenChronicleModelConfig(
-        stage: String? = nil,
-        model: String? = nil,
-        baseUrl: String? = nil,
-        apiKeyEnv: String? = nil,
-        apiKey: String? = nil,
-        maxTokens: Int? = nil
-    ) async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            openChronicleModelConfig = try await client.updateOpenChronicleModelConfig(
-                OpenChronicleModelConfigUpdateRequest(
-                    stage: stage ?? "default",
-                    model: model,
-                    baseUrl: baseUrl,
-                    apiKeyEnv: apiKeyEnv,
-                    apiKey: apiKey,
-                    maxTokens: maxTokens
-                )
-            )
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    func updateVlmacConfig(
-        serviceBaseUrl: String? = nil,
-        vllmBaseUrl: String? = nil,
-        vllmModel: String? = nil,
-        vllmApiKey: String? = nil,
-        temperature: Double? = nil,
-        maxTokens: Int? = nil,
-        timeoutSeconds: Double? = nil
-    ) async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            vlmacConfig = try await client.updateVlmacConfig(
-                VlmacConfigUpdateRequest(
-                    serviceBaseUrl: serviceBaseUrl,
-                    vllmBaseUrl: vllmBaseUrl,
-                    vllmModel: vllmModel,
-                    vllmApiKey: vllmApiKey,
-                    temperature: temperature,
-                    maxTokens: maxTokens,
-                    timeoutSeconds: timeoutSeconds
-                )
-            )
-            snapshot = try await client.state()
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    func updateBasicMemoryEmbeddingConfig(
-        semanticSearchEnabled: Bool? = nil,
-        semanticEmbeddingProvider: String? = nil,
-        semanticEmbeddingModel: String? = nil,
-        semanticEmbeddingBaseUrl: String? = nil,
-        semanticEmbeddingApiKey: String? = nil,
-        semanticEmbeddingApiKeyEnv: String? = nil,
-        semanticEmbeddingDimensions: Int? = nil,
-        semanticEmbeddingBatchSize: Int? = nil,
-        semanticEmbeddingRequestConcurrency: Int? = nil,
-        semanticEmbeddingTimeout: Double? = nil
-    ) async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            basicMemoryEmbeddingConfig = try await client.updateBasicMemoryEmbeddingConfig(
-                BasicMemoryEmbeddingConfigUpdateRequest(
-                    semanticSearchEnabled: semanticSearchEnabled,
-                    semanticEmbeddingProvider: semanticEmbeddingProvider,
-                    semanticEmbeddingModel: semanticEmbeddingModel,
-                    semanticEmbeddingBaseUrl: semanticEmbeddingBaseUrl,
-                    semanticEmbeddingApiKey: semanticEmbeddingApiKey,
-                    semanticEmbeddingApiKeyEnv: semanticEmbeddingApiKeyEnv,
-                    semanticEmbeddingDimensions: semanticEmbeddingDimensions,
-                    semanticEmbeddingBatchSize: semanticEmbeddingBatchSize,
-                    semanticEmbeddingRequestConcurrency: semanticEmbeddingRequestConcurrency,
-                    semanticEmbeddingTimeout: semanticEmbeddingTimeout
-                )
-            )
-            snapshot = try await client.state()
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    func updateProjectCortexConfig(
-        useReal: Bool? = nil,
-        serviceBaseUrl: String? = nil,
-        openaiBaseUrl: String? = nil,
-        openaiModel: String? = nil,
-        openaiApiKey: String? = nil,
-        temperature: Double? = nil,
-        maxTokens: Int? = nil,
-        timeoutSeconds: Double? = nil
-    ) async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            projectCortexConfig = try await client.updateProjectCortexConfig(
-                ProjectCortexConfigUpdateRequest(
-                    useReal: useReal,
-                    serviceBaseUrl: serviceBaseUrl,
-                    openaiBaseUrl: openaiBaseUrl,
-                    openaiModel: openaiModel,
-                    openaiApiKey: openaiApiKey,
-                    temperature: temperature,
-                    maxTokens: maxTokens,
-                    timeoutSeconds: timeoutSeconds
-                )
-            )
-            applyServiceStatus(try await client.projectCortexStatus())
-            snapshot = try await client.state()
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -327,6 +149,122 @@ final class AppStateStore: ObservableObject {
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    func refreshBasicMemory() async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryConfig = try await client.basicMemoryConfig()
+            basicMemoryStatus = try await client.basicMemoryStatus()
+            applyBasicMemoryService(basicMemoryStatus.service)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func setupBasicMemory() async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryStatus = try await client.setupBasicMemory()
+            basicMemoryConfig = try await client.basicMemoryConfig()
+            applyBasicMemoryService(basicMemoryStatus.service)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func searchBasicMemory(_ query: String) async {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemorySearch = try await client.searchBasicMemory(query: trimmed, limit: 8)
+            if let first = basicMemorySearch.results.first {
+                await loadBasicMemoryNotePreview(first)
+            }
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func loadBasicMemoryRecent() async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryRecent = try await client.recentBasicMemoryNotes(limit: 8)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func refreshContextFragments() async {
+        await loadContextFragments(reportErrors: true)
+    }
+
+    func loadBasicMemoryNotePreview(_ result: BasicMemorySearchResult) async {
+        await loadBasicMemoryNotePreview(
+            BasicMemoryNotePreviewRequest(
+                identifier: result.identifier,
+                path: result.path,
+                permalink: result.permalink
+            )
+        )
+    }
+
+    func loadBasicMemoryNotePreview(_ note: BasicMemoryNote) async {
+        await loadBasicMemoryNotePreview(
+            BasicMemoryNotePreviewRequest(
+                identifier: note.identifier,
+                path: note.path,
+                permalink: note.permalink
+            )
+        )
+    }
+
+    func syncCurrentSessionToBasicMemory() async {
+        guard let session = snapshot.currentSession else {
+            lastError = "No current session is available to sync."
+            return
+        }
+        await syncBasicMemorySession(session.id)
+    }
+
+    func syncCurrentTaskToBasicMemory() async {
+        guard let task = snapshot.currentTask else {
+            lastError = "No current task is available to sync."
+            return
+        }
+        await syncBasicMemoryTask(task.id)
+    }
+
+    func syncLatestSkillToBasicMemory() async {
+        guard let skill = snapshot.skills.first else {
+            lastError = "No skill is available to sync."
+            return
+        }
+        await syncBasicMemorySkill(skill.id)
+    }
+
+    func syncLatestContextFragmentToBasicMemory() async {
+        guard let fragment = contextFragments.first else {
+            lastError = "No voice context fragment is available to sync."
+            return
+        }
+        await syncBasicMemoryContext(fragment.id)
     }
 
     func updateAiManusConfig(
@@ -408,6 +346,20 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    func newChatThread() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let response = try await client.createChatSession()
+            manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
+            try await loadManusThreadWithoutBusy(response.sessionId)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     func loadManusThread(_ thread: ManusThread) async {
         await loadManusThread(thread.id)
     }
@@ -450,6 +402,38 @@ final class AppStateStore: ObservableObject {
                 }
             }
             manusThreads = try await client.manusSessions().sessions
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func sendChatMessage(_ content: String, attachments: [JSONValue]? = nil) async {
+        let message = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !message.isEmpty else { return }
+
+        manusChatTask?.cancel()
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            let sessionID: String
+            if let currentManusThread, !currentManusThread.id.hasPrefix("local-") {
+                sessionID = currentManusThread.id
+            } else {
+                let response = try await client.createChatSession()
+                sessionID = response.sessionId
+                manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
+                try await loadManusThreadWithoutBusy(sessionID)
+            }
+
+            appendLocalManusMessage(role: "user", content: message, attachments: attachments)
+            try await client.streamChatMessage(sessionID: sessionID, message: message, attachments: attachments) { event in
+                await MainActor.run {
+                    self.applyManusStreamEvent(event)
+                }
+            }
+            manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -565,8 +549,7 @@ final class AppStateStore: ObservableObject {
     }
 
     func jarvisOff() async {
-        cuaTargetSurface = .empty
-        await run(refreshTargetSurface: false) { try await self.client.jarvisOff() }
+        await run { try await self.client.jarvisOff() }
     }
 
     func pause() async {
@@ -587,41 +570,6 @@ final class AppStateStore: ObservableObject {
 
     func generateActiveTask() async {
         await run { try await self.client.generateActiveTask() }
-    }
-
-    func generateFollowUp() async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            let package = try await client.followUp()
-            snapshot.followUpPackage = package
-            planStatus.followUpPackage = package
-            snapshot = try await client.state()
-            applyPlanFields(from: snapshot)
-            await refreshEventHistory()
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
-    }
-
-    func mailDraft() async {
-        isBusy = true
-        defer { isBusy = false }
-
-        do {
-            let result = try await client.mailDraft()
-            snapshot.mailDraftInsertResult = result
-            planStatus.mailDraftInsertResult = result
-            snapshot = try await client.state()
-            applyPlanFields(from: snapshot)
-            await refreshCuaTargetSurface()
-            await refreshEventHistory()
-            lastError = nil
-        } catch {
-            lastError = error.localizedDescription
-        }
     }
 
     func confirmCurrentTask() async {
@@ -675,24 +623,54 @@ final class AppStateStore: ObservableObject {
         await run { try await self.client.openChronicleTimelineTick() }
     }
 
-    func refreshBasicMemoryStatus() async {
+    func refreshVlmacPreflight(network: Bool = false) async {
         isBusy = true
         defer { isBusy = false }
 
         do {
-            applyServiceStatus(try await client.basicMemoryStatus())
+            vlmacConfig = try await client.vlmacConfig()
+            let service = try await client.vlmacStatus()
+            applyVlmacService(service)
+            vlmacPreflight = try await client.vlmacPreflight(network: network)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
         }
     }
 
-    func refreshVlmacStatus() async {
+    func vlmacStart() async {
+        await run { try await self.client.vlmacStart() }
+    }
+
+    func vlmacStop() async {
+        await run { try await self.client.vlmacStop() }
+    }
+
+    func vlmacRestart() async {
+        await run { try await self.client.vlmacRestart() }
+    }
+
+    func updateVlmacConfig(
+        vlmBaseUrl: String? = nil,
+        vlmModel: String? = nil,
+        vlmApiKey: String? = nil
+    ) async {
         isBusy = true
         defer { isBusy = false }
 
         do {
-            applyServiceStatus(try await client.vlmacStatus())
+            vlmacConfig = try await client.updateVlmacConfig(
+                VlmacConfigRequest(
+                    vlmBaseUrl: vlmBaseUrl,
+                    vlmModel: vlmModel,
+                    vlmApiKey: vlmApiKey
+                )
+            )
+            let service = try await client.vlmacStatus()
+            applyVlmacService(service)
+            vlmacPreflight = try await client.vlmacPreflight(network: false)
+            snapshot = try await client.state()
+            await refreshEventHistory()
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -778,21 +756,17 @@ final class AppStateStore: ObservableObject {
         AppCopy.serviceDetail(detail, status: status, language: language)
     }
 
-    private func run(refreshTargetSurface: Bool = false, _ operation: @escaping () async throws -> AppSnapshot) async {
+    private func run(_ operation: @escaping () async throws -> AppSnapshot) async {
         isBusy = true
         defer { isBusy = false }
 
         do {
             let next = try await operation()
             snapshot = next
-            applyPlanFields(from: next)
             skillStore.persist(next.skills)
-            if refreshTargetSurface {
-                await refreshCuaTargetSurface()
-            } else if next.currentTask == nil {
-                cuaTargetSurface = .empty
-            }
+            await refreshCuaTargetSurface()
             await refreshEventHistory()
+            await loadContextFragments(reportErrors: false)
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -801,12 +775,6 @@ final class AppStateStore: ObservableObject {
                 statusMessage: error.localizedDescription,
                 currentSession: snapshot.currentSession,
                 sopCapture: snapshot.sopCapture,
-                highlightSegment: snapshot.highlightSegment,
-                frontmostContext: snapshot.frontmostContext,
-                followUpPackage: snapshot.followUpPackage,
-                mailDraftInsertResult: snapshot.mailDraftInsertResult,
-                workerStatuses: snapshot.workerStatuses,
-                memoryContextChunks: snapshot.memoryContextChunks,
                 currentTask: snapshot.currentTask,
                 skills: snapshot.skills,
                 services: snapshot.services
@@ -817,6 +785,24 @@ final class AppStateStore: ObservableObject {
     private func refreshEventHistory() async {
         if let events = try? await client.eventHistory(limit: 80) {
             eventHistory = events
+        }
+    }
+
+    private func loadContextFragments(reportErrors: Bool) async {
+        do {
+            let response = try await client.recentContextFragments(
+                sessionID: snapshot.currentSession?.id,
+                modality: "voice",
+                limit: 8
+            )
+            contextFragments = response.resolvedFragments
+            if reportErrors {
+                lastError = nil
+            }
+        } catch {
+            if reportErrors {
+                lastError = error.localizedDescription
+            }
         }
     }
 
@@ -851,6 +837,72 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    private func loadBasicMemoryNotePreview(_ request: BasicMemoryNotePreviewRequest) async {
+        guard request.identifier?.isEmpty == false || request.path?.isEmpty == false || request.permalink?.isEmpty == false else {
+            return
+        }
+
+        do {
+            basicMemoryNotePreview = try await client.basicMemoryNotePreview(request)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemorySession(_ sessionID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemorySession(sessionID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemoryTask(_ taskID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemoryTask(taskID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemorySkill(_ skillID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemorySkill(skillID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    private func syncBasicMemoryContext(_ fragmentID: String) async {
+        isRunningBasicMemoryCommand = true
+        defer { isRunningBasicMemoryCommand = false }
+
+        do {
+            basicMemoryLastSync = try await client.syncBasicMemoryContext(fragmentID: fragmentID)
+            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            await loadContextFragments(reportErrors: false)
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     private func applyAiManusRuntimeService(_ service: ServiceStatus?) {
         guard let service else { return }
         aiManusStatus = AiManusStatus(
@@ -861,32 +913,22 @@ final class AppStateStore: ObservableObject {
         )
     }
 
-    private func applyServiceStatus(_ service: ServiceStatus) {
-        if let index = snapshot.services.firstIndex(where: { $0.name.localizedCaseInsensitiveCompare(service.name) == .orderedSame }) {
+    private func applyBasicMemoryService(_ service: ServiceStatus?) {
+        guard let service else { return }
+        if let index = snapshot.services.firstIndex(where: { $0.id == service.id || $0.name.lowercased() == service.name.lowercased() }) {
             snapshot.services[index] = service
         } else {
             snapshot.services.append(service)
         }
     }
 
-    private func applyPlanStatus(_ status: PlanStatus) {
-        snapshot.highlightSegment = status.highlightSegment
-        snapshot.frontmostContext = status.frontmostContext
-        snapshot.followUpPackage = status.followUpPackage
-        snapshot.mailDraftInsertResult = status.mailDraftInsertResult
-        snapshot.workerStatuses = status.workerStatuses
-        snapshot.memoryContextChunks = status.memoryContextChunks
-    }
-
-    private func applyPlanFields(from snapshot: AppSnapshot) {
-        planStatus = PlanStatus(
-            highlightSegment: snapshot.highlightSegment,
-            frontmostContext: snapshot.frontmostContext,
-            followUpPackage: snapshot.followUpPackage,
-            mailDraftInsertResult: snapshot.mailDraftInsertResult,
-            workerStatuses: snapshot.workerStatuses ?? [],
-            memoryContextChunks: snapshot.memoryContextChunks ?? []
-        )
+    private func applyVlmacService(_ service: ServiceStatus?) {
+        guard let service else { return }
+        if let index = snapshot.services.firstIndex(where: { $0.id == service.id || $0.name.lowercased() == service.name.lowercased() }) {
+            snapshot.services[index] = service
+        } else {
+            snapshot.services.append(service)
+        }
     }
 
     private func loadManusThreadWithoutBusy(_ sessionID: String) async throws {
@@ -965,6 +1007,10 @@ final class AppStateStore: ObservableObject {
             if let message = makeManusMessage(from: data) {
                 manusMessages.append(message)
             }
+        case "message_delta":
+            appendAssistantMessageDelta(from: data)
+        case "message_complete":
+            break
         case "plan":
             manusPlan = planSteps(from: data)
         case "step":
@@ -992,11 +1038,46 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    private func appendAssistantMessageDelta(from value: JSONValue) {
+        guard case .object(let object) = value else { return }
+        let delta = stringField("content", in: object) ?? stringField("delta", in: object) ?? stringField("answer", in: object)
+        guard let delta, !delta.isEmpty else { return }
+        let eventId = normalizedEventId(from: object)
+        let timestamp = intField("timestamp", in: object)
+
+        if let eventId,
+           let index = manusMessages.lastIndex(where: { $0.role == "assistant" && $0.eventId == eventId }) {
+            manusMessages[index].content += delta
+            manusMessages[index].timestamp = timestamp ?? manusMessages[index].timestamp
+            return
+        }
+
+        if eventId == nil,
+           let index = manusMessages.indices.last,
+           manusMessages[index].role == "assistant",
+           manusMessages[index].eventId == nil {
+            manusMessages[index].content += delta
+            manusMessages[index].timestamp = timestamp ?? manusMessages[index].timestamp
+            return
+        }
+
+        manusMessages.append(
+            ManusMessage(
+                id: eventId ?? "message_delta_\(timestamp ?? Int(Date().timeIntervalSince1970))_\(manusMessages.count)",
+                role: "assistant",
+                content: delta,
+                timestamp: timestamp,
+                eventId: eventId,
+                attachments: arrayField("attachments", in: object)
+            )
+        )
+    }
+
     private func makeManusMessage(from value: JSONValue) -> ManusMessage? {
         guard case .object(let object) = value else { return nil }
         let content = stringField("content", in: object) ?? stringField("message", in: object)
         guard let content else { return nil }
-        let eventId = stringField("event_id", in: object) ?? stringField("eventId", in: object)
+        let eventId = normalizedEventId(from: object)
         let timestamp = intField("timestamp", in: object)
         return ManusMessage(
             id: eventId ?? "message_\(timestamp ?? Int(Date().timeIntervalSince1970))_\(manusMessages.count)",
@@ -1024,6 +1105,13 @@ final class AppStateStore: ObservableObject {
             timestamp: intField("timestamp", in: object),
             eventId: stringField("event_id", in: object) ?? stringField("eventId", in: object)
         )
+    }
+
+    private func normalizedEventId(from object: [String: JSONValue]) -> String? {
+        let raw = stringField("event_id", in: object) ?? stringField("eventId", in: object) ?? stringField("message_id", in: object) ?? stringField("messageId", in: object)
+        guard let raw else { return nil }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private func makeToolEvent(from value: JSONValue) -> ManusToolEvent? {

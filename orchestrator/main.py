@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import time
 from datetime import datetime
 from pathlib import Path
@@ -13,13 +14,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
-from .adapters.openchronicle import openchronicle_adapter
 from .adapters.basic_memory import basic_memory_adapter
+from .adapters.openchronicle import openchronicle_adapter
 from .adapters.cua_driver import cua_driver_adapter
-from .adapters.vlmac import vlmac_adapter
 from .adapters.ai_manus import AiManusAuthRequired, ai_manus_adapter
-from .adapters.project_cortex import sop_adapter
-from .plan_runtime import plan_runtime
+from .adapters.project_cortex import hippo_agent_adapter, sop_adapter
+from .adapters.vlmac import vlmac_adapter
 try:
     from .adapters.ownscribe import ownscribe_adapter
 except ImportError:
@@ -38,21 +38,13 @@ from .models import (
     AiManusThreadEvent,
     AiManusThreadMessage,
     Artifact,
-    BasicMemoryEmbeddingConfigRequest,
     CaptureFinishRequest,
     CaptureStatus,
+    ContextFragment,
     CuaTargetSurface,
     DemoSession,
-    FollowUpPackage,
-    ForegroundAXSnapshot,
-    HighlightSegment,
     JarvisState,
-    MailDraftInsertResult,
-    MemoryContextChunk,
-    OpenChronicleModelConfigRequest,
     OwnscribeConfigRequest,
-    PlanWorkerStatus,
-    ProjectCortexConfigRequest,
     ProposedAction,
     ServiceStatus,
     SkillGenerateRequest,
@@ -61,7 +53,7 @@ from .models import (
     new_id,
     now_iso,
 )
-from .store import SKILL_DIR, store, to_dict
+from .store import SESSION_DIR, SKILL_DIR, store, to_dict
 
 
 app = FastAPI(title="HippoDEMO Orchestrator", version="0.1.0")
@@ -86,6 +78,10 @@ _cua_status_checked_at = 0.0
 _ai_manus_status_checked_at = 0.0
 _basic_memory_status_checked_at = 0.0
 _vlmac_status_checked_at = 0.0
+_voice_context_workers: dict[str, asyncio.Task] = {}
+_voice_context_stop_events: dict[str, asyncio.Event] = {}
+_voice_context_offsets: dict[str, float] = {}
+_voice_context_sequences: dict[str, int] = {}
 
 
 def _float_env(name: str, default: float) -> float:
@@ -96,6 +92,9 @@ def _float_env(name: str, default: float) -> float:
 
 
 OWNSCRIBE_STOP_TIMEOUT_SECONDS = _float_env("HIPPODEMO_OWNSCRIBE_STOP_TIMEOUT_SECONDS", 45.0)
+CONTEXT_FRAGMENT_SECONDS = _float_env("HIPPODEMO_CONTEXT_FRAGMENT_SECONDS", 20.0)
+CONTEXT_FRAGMENT_OVERLAP_SECONDS = _float_env("HIPPODEMO_CONTEXT_FRAGMENT_OVERLAP_SECONDS", 3.0)
+CONTEXT_MIN_FRAGMENT_SECONDS = _float_env("HIPPODEMO_CONTEXT_MIN_FRAGMENT_SECONDS", 1.0)
 
 
 def _artifact_payload(artifact: Artifact) -> dict:
@@ -168,178 +167,6 @@ def _service_payload(service: ServiceStatus) -> dict:
     }
 
 
-def _model_payload(model: Any) -> dict[str, Any] | None:
-    if model is None:
-        return None
-    return to_dict(model)
-
-
-def _parse_iso(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except ValueError:
-        return None
-
-
-def _chunk_overlaps(chunk: MemoryContextChunk, *, start_at: str | None, end_at: str | None) -> bool:
-    start = _parse_iso(start_at)
-    end = _parse_iso(end_at)
-    chunk_start = _parse_iso(chunk.start_at)
-    chunk_end = _parse_iso(chunk.end_at)
-    if not start or not end or not chunk_start or not chunk_end:
-        return True
-    return chunk_start <= end and chunk_end >= start
-
-
-def _memory_chunks_for_window(
-    *,
-    session_id: str | None,
-    start_at: str | None,
-    end_at: str | None,
-) -> list[MemoryContextChunk]:
-    chunks = [
-        chunk
-        for chunk in store.state.memory_context_chunks
-        if (not session_id or chunk.session_id == session_id)
-        and _chunk_overlaps(chunk, start_at=start_at, end_at=end_at)
-    ]
-    known_ids = {chunk.id for chunk in chunks}
-    for item in basic_memory_adapter.search_window(
-        session_id=session_id,
-        start_at=start_at,
-        end_at=end_at,
-        limit=50,
-    ):
-        try:
-            chunk = MemoryContextChunk.model_validate(item)
-        except Exception:
-            continue
-        if chunk.id in known_ids:
-            continue
-        chunks.append(chunk)
-        known_ids.add(chunk.id)
-    return sorted(chunks, key=lambda item: item.start_at)
-
-
-def _context_priority(chunks: list[MemoryContextChunk]) -> str:
-    sources = {chunk.source for chunk in chunks}
-    if "video_context" in sources:
-        return "video_context"
-    if "audio_context" in sources:
-        return "audio_context"
-    if sources:
-        return sorted(sources)[0]
-    return "none"
-
-
-def _context_summary(chunks: list[MemoryContextChunk], *, limit: int = 6) -> str:
-    lines = []
-    for chunk in chunks[:limit]:
-        content = chunk.content.strip().replace("\n", " ")
-        if len(content) > 320:
-            content = content[:317].rstrip() + "..."
-        lines.append(f"- [{chunk.source}] {chunk.start_at} -> {chunk.end_at}: {content}")
-    if len(chunks) > limit:
-        lines.append(f"- ... {len(chunks) - limit} more context chunk(s)")
-    return "\n".join(lines)
-
-
-def _worker_status_from_payload(payload: dict[str, Any]) -> PlanWorkerStatus:
-    return PlanWorkerStatus(
-        name=str(payload.get("name") or "worker"),
-        status=str(payload.get("status") or "unknown"),
-        detail=payload.get("detail"),
-        started_at=payload.get("started_at"),
-        updated_at=str(payload.get("updated_at") or now_iso()),
-        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
-    )
-
-
-def _apply_worker_status_payloads(payloads: list[Any]) -> None:
-    statuses = [
-        _worker_status_from_payload(payload)
-        for payload in payloads
-        if isinstance(payload, dict)
-    ]
-    if not statuses:
-        return
-    for status in statuses:
-        replaced = False
-        for index, existing in enumerate(store.state.worker_statuses):
-            if existing.name.lower() == status.name.lower():
-                store.state.worker_statuses[index] = status
-                replaced = True
-                break
-        if not replaced:
-            store.state.worker_statuses.append(status)
-        _set_service_status(ServiceStatus(name=status.name, status=status.status, detail=status.detail))
-
-
-def _runtime_snapshot_to_store(snapshot: dict[str, Any]) -> None:
-    workers = snapshot.get("workers") if isinstance(snapshot.get("workers"), list) else []
-    _apply_worker_status_payloads(workers)
-
-
-def _runtime_chunk_from_payload(payload: dict[str, Any]) -> MemoryContextChunk:
-    return MemoryContextChunk(
-        id=str(payload.get("id") or new_id("chunk")),
-        session_id=payload.get("session_id") or (store.state.current_session.id if store.state.current_session else None),
-        source=str(payload.get("source") or "memory_context"),
-        start_at=str(payload.get("start_at") or payload.get("created_at") or now_iso()),
-        end_at=str(payload.get("end_at") or payload.get("start_at") or payload.get("created_at") or now_iso()),
-        content=str(payload.get("content") or ""),
-        metadata=payload.get("metadata") if isinstance(payload.get("metadata"), dict) else {},
-        created_at=str(payload.get("created_at") or now_iso()),
-    )
-
-
-def _runtime_frontmost_from_payload(payload: dict[str, Any]) -> ForegroundAXSnapshot:
-    editable_fields = payload.get("editable_fields") if isinstance(payload.get("editable_fields"), list) else []
-    metadata = {
-        "source": "plan_runtime",
-        "status": payload.get("status"),
-        "mode": payload.get("mode"),
-        "reason": payload.get("reason"),
-        "signals": payload.get("signals") if isinstance(payload.get("signals"), list) else [],
-        "session_id": payload.get("session_id"),
-    }
-    return ForegroundAXSnapshot(
-        bundle_id=payload.get("bundle_id"),
-        app_name=payload.get("app_name"),
-        window_title=payload.get("window_title"),
-        focused_element=payload.get("focused_element"),
-        visible_text=str(payload.get("visible_text") or ""),
-        tree_markdown=str(payload.get("tree_markdown") or ""),
-        editable_fields=editable_fields,
-        target_surface=None,
-        captured_at=str(payload.get("created_at") or now_iso()),
-        metadata=metadata,
-    )
-
-
-async def _plan_runtime_event_sink(event_type: str, payload: dict[str, Any]) -> None:
-    session_id = payload.get("session_id")
-    if not session_id and store.state.current_session:
-        session_id = store.state.current_session.id
-    async with store._lock:
-        if event_type in {"memory_context_queued", "video_context_ready"}:
-            chunk = _runtime_chunk_from_payload(payload)
-            await store.add_memory_context_chunk(chunk)
-        elif event_type == "ax_snapshot":
-            store.state.frontmost_context = _runtime_frontmost_from_payload(payload)
-            await store.persist()
-        elif event_type in {"plan_runtime_started", "plan_runtime_stopped"}:
-            workers = payload.get("workers") if isinstance(payload.get("workers"), list) else []
-            _apply_worker_status_payloads(workers)
-            await store.persist()
-        await store.publish(event_type, payload, session_id=session_id)
-
-
-plan_runtime.event_sink = _plan_runtime_event_sink
-
-
 def _ai_manus_session_id(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
@@ -348,6 +175,11 @@ def _ai_manus_session_id(payload: Any) -> str | None:
 
 def _ai_manus_remote_session_id(thread: AiManusThread) -> str:
     return thread.manus_session_id or str(thread.metadata.get("manus_session_id") or thread.session_id)
+
+
+def _ai_manus_remote_session_id_or_none(thread: AiManusThread) -> str | None:
+    remote = thread.manus_session_id or thread.metadata.get("manus_session_id")
+    return str(remote) if remote else None
 
 
 def _unix_timestamp(value: str | None) -> int | None:
@@ -432,7 +264,7 @@ def _ai_manus_remote_summary(payload: Any) -> dict | None:
 def _ai_manus_thread_summary(thread: AiManusThread) -> dict:
     return {
         "session_id": thread.session_id,
-        "manus_session_id": _ai_manus_remote_session_id(thread),
+        "manus_session_id": _ai_manus_remote_session_id_or_none(thread),
         "title": thread.title,
         "status": thread.status,
         "latest_message": thread.latest_message,
@@ -441,6 +273,180 @@ def _ai_manus_thread_summary(thread: AiManusThread) -> dict:
         "is_shared": thread.is_shared,
         "updated_at": thread.updated_at,
     }
+
+
+def _safe_read_text(path: str | None, *, limit: int = 12_000) -> str:
+    if not path:
+        return ""
+    try:
+        value = Path(path).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return value[:limit]
+
+
+def _available_skill_summary() -> str:
+    if not store.state.skills:
+        return ""
+    lines = ["# Available Hippo Skills"]
+    for skill in store.state.skills[:8]:
+        path_stem = Path(skill.path).stem if skill.path else ""
+        lines.append(f"- {skill.name}: {skill.description} (id: {skill.id}, handle: {path_stem})")
+    return "\n".join(lines)
+
+
+def _skill_markdown(skill: SkillRecord, *, limit: int = 10_000) -> str:
+    content = _safe_read_text(skill.path, limit=limit)
+    if not content:
+        return ""
+    return "\n".join(
+        [
+            f"# Selected Hippo Skill: {skill.name}",
+            f"id: {skill.id}",
+            f"description: {skill.description}",
+            f"path: {skill.path}",
+            "",
+            content,
+        ]
+    )
+
+
+def _find_mentioned_skill(message: str) -> SkillRecord | None:
+    if not store.state.skills:
+        return None
+    mentions = [item.strip().lower() for item in re.findall(r"@([^\s，,。；;：:]+)", message)]
+    if not mentions:
+        return None
+    latest = store.state.skills[0]
+    for mention in mentions:
+        if mention in {"skill", "sop"}:
+            return latest
+        for skill in store.state.skills:
+            candidates = {
+                skill.id.lower(),
+                skill.name.lower(),
+                Path(skill.path).stem.lower() if skill.path else "",
+            }
+            if mention in candidates or any(mention and mention in candidate for candidate in candidates):
+                return skill
+    return None
+
+
+def _is_sop_execution_request(message: str) -> bool:
+    normalized = re.sub(r"\s+", "", message.lower())
+    return any(marker in normalized for marker in {"执行sop", "运行sop", "执行skill", "运行skill"})
+
+
+def _hippo_agent_skill_input(message: str) -> str:
+    skill = _find_mentioned_skill(message)
+    if not skill and _is_sop_execution_request(message) and store.state.skills:
+        skill = store.state.skills[0]
+    if not skill:
+        return ""
+    return _skill_markdown(skill)
+
+
+def _hippo_agent_context_input(message: str, session_id: str | None = None, *, limit: int = 16_000) -> str:
+    sections: list[str] = []
+    session = store.state.current_session
+    if session:
+        sections.append(
+            "\n".join(
+                [
+                    "# Current Hippo Session",
+                    f"id: {session.id}",
+                    f"title: {session.title}",
+                    f"state: {session.state.value if hasattr(session.state, 'value') else session.state}",
+                    f"started_at: {session.started_at}",
+                    f"ended_at: {session.ended_at or ''}",
+                ]
+            )
+        )
+        if session.artifacts:
+            artifact_lines = ["# Session Artifacts"]
+            for artifact in session.artifacts[-8:]:
+                artifact_lines.append(f"- {artifact.title} ({artifact.type}, id: {artifact.id}, path: {artifact.path or ''})")
+            sections.append("\n".join(artifact_lines))
+
+    fragments = store.list_context_fragments(
+        session_id=session.id if session else None,
+        modality=None,
+        limit=12,
+    )
+    if fragments:
+        lines = ["# Recent Context Fragments"]
+        for fragment in reversed(fragments):
+            text = " ".join(fragment.text.split())
+            if len(text) > 700:
+                text = f"{text[:700]}..."
+            lines.append(
+                f"- [{fragment.modality}/{fragment.source}] {fragment.started_at}"
+                f"{' -> ' + fragment.ended_at if fragment.ended_at else ''}: {text}"
+            )
+        sections.append("\n".join(lines))
+
+    if store.state.active_tasks:
+        task_lines = ["# Active Tasks"]
+        for task in store.state.active_tasks[:5]:
+            task_lines.append(f"- {task.title} ({task.status.value if hasattr(task.status, 'value') else task.status}, id: {task.id})")
+        sections.append("\n".join(task_lines))
+
+    skill_summary = _available_skill_summary()
+    if skill_summary:
+        sections.append(skill_summary)
+    mentioned_skill = _find_mentioned_skill(message)
+    if mentioned_skill:
+        sections.append(f"# Routed Skill Mention\nThe user mentioned @{mentioned_skill.name} ({mentioned_skill.id}).")
+
+    context = "\n\n".join(section for section in sections if section)
+    return context[:limit]
+
+
+def _chat_route_for_message(message: str, requested_route: str | None = None) -> str:
+    route = (requested_route or "auto").strip().lower()
+    if route in {"hippo", "hippo-agent", "hippo_agent", "project_cortex", "project-cortex"}:
+        return "hippo_agent"
+    if route in {"manus", "ai-manus", "ai_manus"}:
+        return "manus"
+
+    text = message.lower()
+    normalized = re.sub(r"\s+", "", text)
+    manus_markers = [
+        "cua",
+        "computer use",
+        "computer-use",
+        "本机操作",
+        "操作本机",
+        "控制电脑",
+        "浏览器",
+        "browser",
+        "sandbox",
+        "沙盒",
+        "代码",
+        "code",
+        "shell",
+        "terminal",
+    ]
+    if any(marker in text for marker in manus_markers):
+        return "manus"
+
+    if re.search(r"@\S+", message) or _is_sop_execution_request(message):
+        return "hippo_agent"
+
+    meeting_actions = ["预约", "安排", "创建", "发起", "预定", "订", "schedule", "book", "create"]
+    doc_actions = ["写", "创建", "新建", "更新", "整理", "生成", "修改", "编辑", "draft", "write", "create", "update", "edit"]
+    mail_actions = ["发", "发送", "写", "草拟", "起草", "回复", "send", "draft", "write", "reply"]
+    if any(keyword in text for keyword in ["腾讯会议", "tencent meeting", "voov meeting"]) and any(action in text for action in meeting_actions):
+        return "hippo_agent"
+    if any(keyword in text for keyword in ["飞书会议", "feishu meeting", "lark meeting"]) and any(action in text for action in meeting_actions):
+        return "hippo_agent"
+    if any(keyword in text for keyword in ["飞书文档", "feishu doc", "feishu docs", "lark doc", "lark docs"]) and any(action in text for action in doc_actions):
+        return "hippo_agent"
+    if any(keyword in text for keyword in ["邮件", "email", "e-mail"]) and any(action in text for action in mail_actions):
+        return "hippo_agent"
+    if any(marker in normalized for marker in {"预约腾讯会议", "预约飞书会议", "写飞书文档", "发邮件", "发送邮件", "写邮件"}):
+        return "hippo_agent"
+    return "manus"
 
 
 def _ai_manus_thread_detail(thread: AiManusThread) -> dict:
@@ -467,6 +473,34 @@ def _ai_manus_status_payload(service: ServiceStatus) -> dict:
     }
 
 
+def _basic_memory_status_payload(service: ServiceStatus) -> dict:
+    config = basic_memory_adapter.config()
+    project_path = config.get("project_path")
+    return {
+        "ok": service.status == "online",
+        "status": service.status,
+        "detail": service.detail,
+        "project": config.get("project"),
+        "project_path": project_path,
+        "config_path": config.get("config_path"),
+        "sync_status": service.status,
+        "service": _service_payload(service),
+        "config": config,
+    }
+
+
+async def _apply_hippo_agent_status() -> dict[str, Any]:
+    payload = hippo_agent_adapter.status()
+    service = ServiceStatus(
+        name=payload.get("name") or "Project_Cortex",
+        status=payload.get("status") or "unknown",
+        detail=payload.get("detail"),
+    )
+    _set_service_status(service)
+    await store.persist()
+    return payload
+
+
 def _ai_manus_thread_or_404(thread_id: str) -> AiManusThread:
     try:
         return store.get_ai_manus_thread(thread_id)
@@ -483,6 +517,25 @@ async def _require_ai_manus_online() -> ServiceStatus:
     if service.status != "online":
         raise HTTPException(status_code=503, detail=service.detail or "ai-manus backend unavailable")
     return service
+
+
+async def _ensure_ai_manus_remote_session(thread: AiManusThread) -> AiManusThread:
+    if _ai_manus_remote_session_id_or_none(thread):
+        return thread
+    data = await ai_manus_adapter.create_session()
+    manus_session_id = _ai_manus_session_id(data)
+    if not manus_session_id:
+        raise RuntimeError("ai-manus create session returned no session_id")
+    thread.manus_session_id = manus_session_id
+    thread.metadata["manus_session_id"] = manus_session_id
+    thread.metadata["remote_created_by"] = "hippo-chat-auto-route"
+    await store.save_ai_manus_thread(thread)
+    await store.publish(
+        "ai_manus_session_created",
+        {"session_id": thread.session_id, "manus_session_id": manus_session_id, "source": "hippo-chat-auto-route"},
+        session_id=thread.session_id,
+    )
+    return thread
 
 
 def _ai_manus_files_count(payload: Any) -> int:
@@ -687,7 +740,7 @@ async def _refresh_basic_memory_status() -> ServiceStatus:
     if current and now - _basic_memory_status_checked_at < BASIC_MEMORY_STATUS_TTL_SECONDS:
         return current
 
-    service = basic_memory_adapter.status()
+    service = await basic_memory_adapter.status()
     async with store._lock:
         _set_service_status(service)
         await store.persist()
@@ -762,6 +815,13 @@ async def _apply_vlmac_status(service: ServiceStatus) -> None:
     _vlmac_status_checked_at = time.monotonic()
 
 
+async def _apply_voice_context_status(status: str, detail: str | None = None) -> ServiceStatus:
+    service = ServiceStatus(name="voice-context", status=status, detail=detail)
+    _set_service_status(service)
+    await store.persist()
+    return service
+
+
 def _sop_state() -> str:
     status = store.state.sop_capture.status
     if status == CaptureStatus.CAPTURING:
@@ -834,12 +894,6 @@ def state_payload():
             "check_out": store.state.sop_capture.check_out,
             "state": _sop_state(),
         },
-        "highlight_segment": _model_payload(store.state.highlight_segment),
-        "frontmost_context": _model_payload(store.state.frontmost_context),
-        "follow_up_package": _model_payload(store.state.follow_up_package),
-        "mail_draft_insert_result": _model_payload(store.state.mail_draft_insert_result),
-        "worker_statuses": [to_dict(status) for status in store.state.worker_statuses],
-        "memory_context_chunks": [to_dict(chunk) for chunk in store.state.memory_context_chunks[-20:]],
         "current_task": _task_payload(current_task) if current_task else None,
         "skills": [_skill_payload(skill) for skill in store.state.skills],
         "services": [_service_payload(service) for service in store.state.services],
@@ -1096,12 +1150,9 @@ def _artifact_by_id(task: ActiveTask, artifact_id: str | None) -> Artifact | Non
 
 def _insert_action_and_text(task: ActiveTask) -> tuple[ProposedAction | None, str | None]:
     for action in task.proposed_actions:
-        if action.payload.get("mode") not in {"insert_draft", "insert_mail_draft"}:
+        if action.payload.get("mode") != "insert_draft":
             continue
-        artifact = _artifact_by_id(
-            task,
-            action.payload.get("artifact_id") or action.payload.get("body_artifact_id"),
-        )
+        artifact = _artifact_by_id(task, action.payload.get("artifact_id"))
         if artifact and artifact.content and artifact.content.strip():
             return action, artifact.content.strip()
         return action, None
@@ -1129,59 +1180,6 @@ def _cua_result_payload(result) -> dict[str, Any]:
     }
 
 
-def _snapshot_from_surface(surface: CuaTargetSurface) -> ForegroundAXSnapshot:
-    editable_fields = []
-    if surface.element_index is not None:
-        editable_fields.append(
-            {
-                "index": surface.element_index,
-                "role": surface.element_role,
-                "mode": surface.mode,
-            }
-        )
-    return ForegroundAXSnapshot(
-        bundle_id=surface.bundle_id,
-        app_name=surface.app_name,
-        window_title=surface.window_title,
-        focused_element=surface.element_role,
-        visible_text=surface.window_title or "",
-        tree_markdown="",
-        editable_fields=editable_fields,
-        target_surface=surface,
-        metadata={"source": "cua_target_surface", "status": surface.status, "reason": surface.reason},
-    )
-
-
-def _wechat_intent_from_snapshot(snapshot: ForegroundAXSnapshot) -> dict[str, Any] | None:
-    text = "\n".join(
-        item
-        for item in [snapshot.visible_text, snapshot.tree_markdown, snapshot.window_title or ""]
-        if item
-    ).lower()
-    if snapshot.bundle_id not in {"com.tencent.xinWeChat", "com.tencent.WeWorkMac"} and "微信" not in text and "wechat" not in text:
-        return None
-    keywords = ["会议纪要", "发邮件", "邮件", "follow up", "follow-up", "send email", "meeting notes"]
-    matched = [keyword for keyword in keywords if keyword.lower() in text]
-    if not matched:
-        return None
-    return {
-        "type": "wechat_intent",
-        "matched": matched,
-        "bundle_id": snapshot.bundle_id,
-        "window_title": snapshot.window_title,
-        "captured_at": snapshot.captured_at,
-    }
-
-
-def _mail_compose_ready_from_snapshot(snapshot: ForegroundAXSnapshot) -> bool:
-    if snapshot.bundle_id not in {"com.apple.mail", "com.microsoft.Outlook"}:
-        return False
-    title = (snapshot.window_title or "").lower()
-    if any(marker in title for marker in ["new message", "compose", "新邮件", "撰写"]):
-        return True
-    return bool(snapshot.editable_fields)
-
-
 def _target_surface_payload(surface: CuaTargetSurface) -> dict[str, Any]:
     return to_dict(surface)
 
@@ -1194,6 +1192,335 @@ def _sync_task_target_surface(task: ActiveTask, surface: CuaTargetSurface) -> No
         action.payload["target_surface"] = payload
         if action.status in {"proposed", "target_ready", "waiting_for_target", "insert_failed"}:
             action.status = "target_ready" if surface.safe else "waiting_for_target"
+
+
+def _context_fragment_event_payload(fragment: ContextFragment, *, status: str | None = None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": fragment.id,
+        "session_id": fragment.session_id,
+        "modality": fragment.modality,
+        "source": fragment.source,
+        "started_at": fragment.started_at,
+        "ended_at": fragment.ended_at,
+        "sequence": fragment.sequence,
+        "text_length": len(fragment.text),
+        "synced": bool(fragment.synced_at),
+    }
+    if status:
+        payload["status"] = status
+    return payload
+
+
+def _context_timestamp_from_offset(timeline: dict[str, Any], offset_seconds: float) -> str:
+    base_epoch = timeline.get("recording_started_epoch_seconds")
+    if isinstance(base_epoch, (int, float)):
+        return datetime.fromtimestamp(float(base_epoch) + offset_seconds).astimezone().isoformat()
+    started_at = timeline.get("recording_started_at")
+    if isinstance(started_at, str) and started_at:
+        try:
+            base = datetime.fromisoformat(started_at)
+            return datetime.fromtimestamp(base.timestamp() + offset_seconds).astimezone().isoformat()
+        except ValueError:
+            pass
+    return now_iso()
+
+
+def _context_note_for_fragment(fragment: ContextFragment) -> tuple[str, str, str]:
+    short_id = _short_source_id(fragment.id)
+    modality = fragment.modality or "voice"
+    title = f"Hippo {modality.title()} Context {short_id}"
+    folder = f"hippo/context/{modality}/chunks"
+    lines = [
+        f"# {title}",
+        "",
+        "## Source",
+        "- source_kind: context_fragment",
+        f"- source_id: `{fragment.id}`",
+        f"- session_id: `{fragment.session_id}`",
+        f"- modality: {fragment.modality}",
+        f"- source: {fragment.source}",
+        f"- sequence: {fragment.sequence}",
+        f"- started_at: {fragment.started_at}",
+        f"- ended_at: {fragment.ended_at or ''}",
+        f"- confidence: {fragment.confidence if fragment.confidence is not None else ''}",
+        "",
+        "## Context",
+        fragment.text.strip(),
+        "",
+        "## Relations",
+        f"- from_session [[Hippo Session {_short_source_id(fragment.session_id)}]]",
+    ]
+    offsets = {
+        key: value
+        for key, value in fragment.metadata.items()
+        if key in {"audio_start_offset_seconds", "audio_end_offset_seconds", "segment_path", "asr_provider", "asr_model"}
+    }
+    if offsets:
+        lines.extend(["", "## Capture Metadata"])
+        for key, value in offsets.items():
+            lines.append(f"- {key}: {value}")
+    return title, folder, "\n".join(lines).strip() + "\n"
+
+
+async def _sync_basic_memory_context(fragment: ContextFragment) -> dict[str, Any]:
+    title, folder, content = _context_note_for_fragment(fragment)
+    result = await basic_memory_adapter.write_note(
+        kind=f"context_{fragment.modality}",
+        source_id=fragment.id,
+        title=title,
+        folder=folder,
+        content=content,
+    )
+    result = {**result, "fragment_id": fragment.id}
+    if result.get("ok"):
+        fragment = await store.mark_context_fragment_synced(fragment.id)
+        await store.publish(
+            "context_fragment_synced",
+            {
+                **_context_fragment_event_payload(fragment, status=str(result.get("status") or "synced")),
+                "identifier": result.get("identifier") or result.get("permalink"),
+                "path": result.get("path"),
+            },
+            session_id=fragment.session_id,
+        )
+    return result
+
+
+async def _sync_basic_memory_context_best_effort(fragment: ContextFragment) -> None:
+    try:
+        await _sync_basic_memory_context(fragment)
+    except Exception as exc:
+        await store.publish(
+            "context_fragment_sync_failed",
+            {
+                **_context_fragment_event_payload(fragment, status="failed"),
+                "detail": str(exc),
+            },
+            session_id=fragment.session_id,
+        )
+
+
+async def _create_voice_context_fragment(
+    session_id: str,
+    *,
+    sequence: int,
+    start_offset_seconds: float,
+    end_offset_seconds: float,
+    allow_partial: bool = False,
+) -> ContextFragment | None:
+    if ownscribe_adapter is None:
+        return None
+
+    segment_path = await asyncio.to_thread(
+        ownscribe_adapter.create_audio_segment,
+        session_id,
+        sequence=sequence,
+        start_offset_seconds=start_offset_seconds,
+        end_offset_seconds=end_offset_seconds,
+        allow_partial=allow_partial,
+    )
+    transcription = await asyncio.to_thread(ownscribe_adapter.transcribe_audio_segment, segment_path)
+    text = str(transcription.get("text") or "").strip()
+    if not text:
+        return None
+
+    timeline = await asyncio.to_thread(ownscribe_adapter.recording_timeline, session_id)
+    fragment = ContextFragment(
+        session_id=session_id,
+        modality="voice",
+        source="ownscribe",
+        text=text,
+        started_at=_context_timestamp_from_offset(timeline, start_offset_seconds),
+        ended_at=_context_timestamp_from_offset(timeline, end_offset_seconds),
+        sequence=sequence,
+        metadata={
+            "audio_start_offset_seconds": round(start_offset_seconds, 3),
+            "audio_end_offset_seconds": round(end_offset_seconds, 3),
+            "segment_path": str(segment_path),
+            "asr_provider": transcription.get("provider"),
+            "asr_model": transcription.get("model"),
+        },
+    )
+    await store.save_context_fragment(fragment)
+    await store.publish(
+        "context_fragment_created",
+        _context_fragment_event_payload(fragment, status="created"),
+        session_id=session_id,
+    )
+    asyncio.create_task(_sync_basic_memory_context_best_effort(fragment))
+    _voice_context_offsets[session_id] = max(end_offset_seconds - CONTEXT_FRAGMENT_OVERLAP_SECONDS, 0.0)
+    _voice_context_sequences[session_id] = sequence + 1
+    return fragment
+
+
+async def _voice_context_worker(session_id: str, stop_event: asyncio.Event) -> None:
+    await store.publish(
+        "ownscribe_context_worker_started",
+        {
+            "session_id": session_id,
+            "modality": "voice",
+            "fragment_seconds": CONTEXT_FRAGMENT_SECONDS,
+            "overlap_seconds": CONTEXT_FRAGMENT_OVERLAP_SECONDS,
+        },
+        session_id=session_id,
+    )
+    async with store._lock:
+        await _apply_voice_context_status("recording", f"voice context running for {session_id}")
+
+    sequence = _voice_context_sequences.get(session_id, 0)
+    cursor = _voice_context_offsets.get(session_id, 0.0)
+
+    try:
+        while not stop_event.is_set():
+            await asyncio.sleep(1.0)
+            if ownscribe_adapter is None:
+                continue
+            try:
+                available = await asyncio.to_thread(ownscribe_adapter.recording_audio_duration_seconds, session_id)
+            except Exception:
+                continue
+
+            target_end = cursor + CONTEXT_FRAGMENT_SECONDS
+            if available < target_end:
+                continue
+
+            lag = max(0.0, available - target_end)
+            if lag > CONTEXT_FRAGMENT_SECONDS * 2:
+                await store.publish(
+                    "ownscribe_context_worker_backpressure",
+                    {
+                        "session_id": session_id,
+                        "lag_seconds": round(lag, 3),
+                        "cursor_seconds": round(cursor, 3),
+                        "available_seconds": round(available, 3),
+                    },
+                    session_id=session_id,
+                )
+                cursor = max(0.0, available - CONTEXT_FRAGMENT_SECONDS)
+
+            try:
+                fragment = await _create_voice_context_fragment(
+                    session_id,
+                    sequence=sequence,
+                    start_offset_seconds=cursor,
+                    end_offset_seconds=cursor + CONTEXT_FRAGMENT_SECONDS,
+                )
+            except Exception as exc:
+                await store.publish(
+                    "context_fragment_sync_failed",
+                    {
+                        "session_id": session_id,
+                        "modality": "voice",
+                        "source": "ownscribe",
+                        "sequence": sequence,
+                        "status": "transcribe_failed",
+                        "detail": str(exc),
+                    },
+                    session_id=session_id,
+                )
+                cursor = max(0.0, cursor + CONTEXT_FRAGMENT_SECONDS - CONTEXT_FRAGMENT_OVERLAP_SECONDS)
+                sequence += 1
+                continue
+
+            cursor = max(0.0, cursor + CONTEXT_FRAGMENT_SECONDS - CONTEXT_FRAGMENT_OVERLAP_SECONDS)
+            sequence += 1
+            if fragment is None:
+                _voice_context_offsets[session_id] = cursor
+                _voice_context_sequences[session_id] = sequence
+    finally:
+        _voice_context_offsets[session_id] = cursor
+        _voice_context_sequences[session_id] = sequence
+        await store.publish(
+            "ownscribe_context_worker_stopped",
+            {
+                "session_id": session_id,
+                "modality": "voice",
+                "cursor_seconds": round(cursor, 3),
+                "sequence": sequence,
+            },
+            session_id=session_id,
+        )
+        async with store._lock:
+            await _apply_voice_context_status("idle", f"voice context stopped for {session_id}")
+
+
+async def _start_voice_context_worker(session_id: str) -> None:
+    existing = _voice_context_workers.get(session_id)
+    if existing and not existing.done():
+        return
+    async with store._lock:
+        await _apply_voice_context_status("starting", f"voice context starting for {session_id}")
+    stop_event = asyncio.Event()
+    _voice_context_stop_events[session_id] = stop_event
+    _voice_context_offsets.setdefault(session_id, 0.0)
+    _voice_context_sequences.setdefault(session_id, 0)
+    _voice_context_workers[session_id] = asyncio.create_task(
+        _voice_context_worker(session_id, stop_event),
+        name=f"voice-context-{session_id}",
+    )
+
+
+async def _stop_voice_context_worker(session_id: str) -> None:
+    stop_event = _voice_context_stop_events.get(session_id)
+    task = _voice_context_workers.get(session_id)
+    if stop_event:
+        stop_event.set()
+    if task and not task.done():
+        try:
+            await asyncio.wait_for(task, timeout=10.0)
+        except asyncio.TimeoutError:
+            task.cancel()
+            await store.publish(
+                "ownscribe_context_worker_stopped",
+                {"session_id": session_id, "modality": "voice", "status": "cancelled"},
+                session_id=session_id,
+            )
+
+
+async def _flush_voice_context_fragment(session_id: str) -> None:
+    if ownscribe_adapter is None:
+        return
+    start = _voice_context_offsets.get(session_id, 0.0)
+    sequence = _voice_context_sequences.get(session_id, 0)
+    try:
+        available = await asyncio.to_thread(ownscribe_adapter.recording_audio_duration_seconds, session_id)
+    except Exception as exc:
+        await store.publish(
+            "context_fragment_sync_failed",
+            {
+                "session_id": session_id,
+                "modality": "voice",
+                "source": "ownscribe",
+                "sequence": sequence,
+                "status": "flush_failed",
+                "detail": str(exc),
+            },
+            session_id=session_id,
+        )
+        return
+    if available - start < CONTEXT_MIN_FRAGMENT_SECONDS:
+        return
+    try:
+        await _create_voice_context_fragment(
+            session_id,
+            sequence=sequence,
+            start_offset_seconds=start,
+            end_offset_seconds=available,
+            allow_partial=True,
+        )
+    except Exception as exc:
+        await store.publish(
+            "context_fragment_sync_failed",
+            {
+                "session_id": session_id,
+                "modality": "voice",
+                "source": "ownscribe",
+                "sequence": sequence,
+                "status": "flush_failed",
+                "detail": str(exc),
+            },
+            session_id=session_id,
+        )
 
 
 async def generate_skill_record(
@@ -1211,8 +1538,6 @@ async def generate_skill_record(
         name=name,
         description=description,
     )
-    sop_config = sop_adapter.config()
-    model_configured = bool(sop_config.get("openai_base_url") and sop_config.get("openai_model"))
     skill_id = new_id("skill")
     path = SKILL_DIR / f"{skill_id}.md"
     skill = SkillRecord(
@@ -1223,11 +1548,7 @@ async def generate_skill_record(
         source_session_id=source_session_id,
         check_in=check_in,
         check_out=check_out,
-        metadata={
-            "adapter": "Project_Cortex",
-            "mock": not sop_adapter.use_real and not model_configured,
-            "generation_mode": "project_cortex_service" if sop_adapter.use_real else ("openai_compatible" if model_configured else "mock"),
-        },
+        metadata={"adapter": "Project_Cortex", "mock": not sop_adapter.use_real},
     )
     await store.add_skill(skill, result.mdfile)
     await store.publish("skill_generated", to_dict(skill), session_id=source_session_id)
@@ -1243,28 +1564,33 @@ async def health() -> ServiceStatus:
 async def get_state():
     await _refresh_openchronicle_status()
     await _refresh_ownscribe_status()
-    await _refresh_basic_memory_status()
-    await _refresh_vlmac_status()
     await _refresh_cua_status()
     await _refresh_ai_manus_status()
+    await _refresh_basic_memory_status()
+    await _refresh_vlmac_status()
     return state_payload()
-
-
-@app.get("/plan")
-async def plan_status():
-    return {
-        "highlight_segment": _model_payload(store.state.highlight_segment),
-        "frontmost_context": _model_payload(store.state.frontmost_context),
-        "follow_up_package": _model_payload(store.state.follow_up_package),
-        "mail_draft_insert_result": _model_payload(store.state.mail_draft_insert_result),
-        "worker_statuses": [to_dict(status) for status in store.state.worker_statuses],
-        "memory_context_chunks": [to_dict(chunk) for chunk in store.state.memory_context_chunks[-20:]],
-    }
 
 
 @app.get("/events/history")
 async def event_history(limit: int = 50):
     return [to_dict(event) for event in store.bus.history(limit)]
+
+
+@app.get("/context/recent")
+async def context_recent(
+    session_id: str | None = None,
+    modality: str | None = None,
+    limit: int = 50,
+):
+    fragments = store.list_context_fragments(
+        session_id=session_id,
+        modality=modality,
+        limit=limit,
+    )
+    return {
+        "fragments": [to_dict(fragment) for fragment in fragments],
+        "count": len(fragments),
+    }
 
 
 @app.get("/events")
@@ -1303,19 +1629,24 @@ async def jarvis_on():
         ("start_recording", "start", "record"),
         session_id=session.id,
     )
-    runtime_snapshot = await plan_runtime.start(session.id)
     ownscribe_ok = ownscribe_service.status not in {"error", "unavailable"}
     session.metadata["ownscribe"] = _payload_from_result(ownscribe_result)
-    session.metadata["plan_runtime"] = runtime_snapshot
     if not ownscribe_ok:
         session.metadata["mode"] = "adapter-first-with-ownscribe-fallback"
+    vlmac_service = await vlmac_adapter.start()
+    session.metadata["vlmac"] = {
+        "status": vlmac_service.status,
+        "detail": vlmac_service.detail,
+        "config": vlmac_adapter.config(),
+    }
+    response: dict[str, Any] | None = None
     async with store._lock:
         store.state.current_session = session
         store.state.jarvis_state = JarvisState.MEETING_ACTIVE
         store.state.sop_capture.status = CaptureStatus.IDLE
-        _runtime_snapshot_to_store(runtime_snapshot)
         await _apply_openchronicle_status(openchronicle_service)
         await _apply_ownscribe_status(ownscribe_service)
+        await _apply_vlmac_status(vlmac_service)
         await store.persist()
         await store.publish("session_started", to_dict(session), session_id=session.id)
         await store.publish(
@@ -1327,7 +1658,16 @@ async def jarvis_on():
             },
             session_id=session.id,
         )
-        return state_payload()
+        await store.publish(
+            "vlmac_command",
+            {"action": "start", "service": to_dict(vlmac_service), "config": vlmac_adapter.config()},
+            session_id=session.id,
+        )
+        response = state_payload()
+    if ownscribe_ok:
+        await _start_voice_context_worker(session.id)
+        response = state_payload()
+    return response or state_payload()
 
 
 @app.post("/session/jarvis-off")
@@ -1336,7 +1676,7 @@ async def jarvis_off():
         raise HTTPException(status_code=409, detail="No active session to stop.")
     session_id = store.state.current_session.id
     openchronicle_service = await openchronicle_adapter.stop()
-    runtime_snapshot = await plan_runtime.stop(session_id)
+    await _stop_voice_context_worker(session_id)
     ownscribe_result, ownscribe_service = await _call_ownscribe(
         ("stop_recording", "stop", "finish", "finalize"),
         session_id=session_id,
@@ -1344,13 +1684,26 @@ async def jarvis_off():
         terminate_timeout=5.0,
         kill_timeout=2.0,
     )
+    if ownscribe_service.status not in {"error", "unavailable"}:
+        await _flush_voice_context_fragment(session_id)
+    vlmac_ingest = await vlmac_adapter.ingest()
+    vlmac_sync_results = []
+    for summary in vlmac_ingest.summaries:
+        try:
+            vlmac_sync_results.append(await _sync_basic_memory_vlmac_summary(summary, session_id=session_id))
+        except Exception as exc:
+            await store.publish(
+                "basic_memory_sync_failed",
+                {"kind": "vlmac_video_summary", "detail": str(exc)},
+                session_id=session_id,
+            )
+    vlmac_service = await vlmac_adapter.status()
     async with store._lock:
         session = store.state.current_session
         if not session:
             raise HTTPException(status_code=409, detail="No active session to stop.")
         session.ended_at = now_iso()
         session.state = JarvisState.ACTIVE_TASK_CANDIDATE
-        session.metadata["plan_runtime"] = runtime_snapshot
         artifacts = ownscribe_artifacts(ownscribe_result, session)
         ownscribe_ok = ownscribe_service.status not in {"error", "unavailable"} and bool(artifacts)
         if not ownscribe_ok:
@@ -1361,6 +1714,12 @@ async def jarvis_off():
                     status="error",
                     detail="stop_recording returned no transcript, summary, or audio artifacts; using mock fallback",
                 )
+        vlmac_artifacts = [
+            artifact
+            for artifact in (_vlmac_artifact_from_summary(summary) for summary in vlmac_ingest.summaries)
+            if artifact is not None
+        ]
+        artifacts.extend(vlmac_artifacts)
         persisted_artifacts = []
         for artifact in artifacts:
             persisted_artifacts.append(await store.add_artifact(artifact, session=session))
@@ -1371,7 +1730,7 @@ async def jarvis_off():
         session.state = JarvisState.INTERVENTION_READY
         await _apply_openchronicle_status(openchronicle_service)
         await _apply_ownscribe_status(ownscribe_service)
-        _runtime_snapshot_to_store(runtime_snapshot)
+        await _apply_vlmac_status(vlmac_service)
         await store.persist()
         await store.publish(
             "ownscribe_recording_stopped" if ownscribe_ok else "ownscribe_recording_failed",
@@ -1391,6 +1750,23 @@ async def jarvis_off():
                     "artifact_ids": [artifact.id for artifact in persisted_artifacts],
                     "artifact_types": [artifact.type for artifact in persisted_artifacts],
                 },
+                session_id=session.id,
+            )
+        if vlmac_artifacts:
+            await store.publish(
+                "vlmac_artifacts_ingested",
+                {
+                    "artifact_ids": [artifact.id for artifact in persisted_artifacts if artifact.type.startswith("vlmac_")],
+                    "summary_count": len(vlmac_ingest.summaries),
+                    "basic_memory_sync_count": len(vlmac_sync_results),
+                    "rolling_context_path": vlmac_ingest.rolling_context_path,
+                },
+                session_id=session.id,
+            )
+        else:
+            await store.publish(
+                "vlmac_capture_unavailable",
+                {"detail": vlmac_ingest.detail, "rolling_context_path": vlmac_ingest.rolling_context_path},
                 session_id=session.id,
             )
         await store.publish("active_task_generated", to_dict(task), session_id=session.id)
@@ -1476,180 +1852,6 @@ async def openchronicle_timeline_tick():
     return await _openchronicle_command_snapshot("timeline-tick", openchronicle_adapter.timeline_tick)
 
 
-@app.get("/integrations/openchronicle/model-config")
-async def openchronicle_model_config(stage: str = "default"):
-    try:
-        return openchronicle_adapter.model_config(stage)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-
-@app.post("/integrations/openchronicle/model-config")
-async def openchronicle_update_model_config(request: OpenChronicleModelConfigRequest):
-    try:
-        config = openchronicle_adapter.update_model_config(
-            stage=request.stage,
-            model=request.model,
-            base_url=request.base_url,
-            api_key_env=request.api_key_env,
-            api_key=request.api_key,
-            max_tokens=request.max_tokens,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    async with store._lock:
-        await store.publish(
-            "openchronicle_model_config_updated",
-            {
-                "stage": config.get("stage"),
-                "model": config.get("model"),
-                "base_url": config.get("base_url"),
-                "api_key_configured": config.get("api_key_configured"),
-                "restart_required": config.get("restart_required"),
-            },
-        )
-    return config
-
-
-@app.get("/integrations/vlmac/status")
-async def vlmac_status():
-    service = await vlmac_adapter.status()
-    async with store._lock:
-        _set_service_status(service)
-        await store.persist()
-    return to_dict(service)
-
-
-@app.get("/integrations/vlmac/config")
-async def vlmac_config():
-    return vlmac_adapter.config()
-
-
-@app.post("/integrations/vlmac/config")
-async def vlmac_update_config(request: VlmacConfigRequest):
-    try:
-        config = vlmac_adapter.update_config(
-            service_base_url=request.service_base_url,
-            vllm_base_url=request.vllm_base_url,
-            vllm_model=request.vllm_model,
-            vllm_api_key=request.vllm_api_key,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            timeout_seconds=request.timeout_seconds,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    service = await vlmac_adapter.status()
-    async with store._lock:
-        _set_service_status(service)
-        await store.persist()
-        await store.publish(
-            "vlmac_config_updated",
-            {
-                "service_base_url": config.get("service_base_url"),
-                "vllm_base_url": config.get("vllm_base_url"),
-                "vllm_model": config.get("vllm_model"),
-                "api_key_configured": config.get("vllm_api_key_configured"),
-                "restart_required": config.get("restart_required"),
-            },
-        )
-    return config
-
-
-@app.get("/integrations/basic-memory/status")
-async def basic_memory_status():
-    service = basic_memory_adapter.status()
-    async with store._lock:
-        _set_service_status(service)
-        await store.persist()
-    return to_dict(service)
-
-
-@app.get("/integrations/basic-memory/embedding-config")
-async def basic_memory_embedding_config():
-    return basic_memory_adapter.config()
-
-
-@app.post("/integrations/basic-memory/embedding-config")
-async def basic_memory_update_embedding_config(request: BasicMemoryEmbeddingConfigRequest):
-    try:
-        config = basic_memory_adapter.update_embedding_config(
-            semantic_search_enabled=request.semantic_search_enabled,
-            semantic_embedding_provider=request.semantic_embedding_provider,
-            semantic_embedding_model=request.semantic_embedding_model,
-            semantic_embedding_base_url=request.semantic_embedding_base_url,
-            semantic_embedding_api_key=request.semantic_embedding_api_key,
-            semantic_embedding_api_key_env=request.semantic_embedding_api_key_env,
-            semantic_embedding_dimensions=request.semantic_embedding_dimensions,
-            semantic_embedding_batch_size=request.semantic_embedding_batch_size,
-            semantic_embedding_request_concurrency=request.semantic_embedding_request_concurrency,
-            semantic_embedding_timeout=request.semantic_embedding_timeout,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    service = basic_memory_adapter.status()
-    async with store._lock:
-        _set_service_status(service)
-        await store.persist()
-        await store.publish(
-            "basic_memory_embedding_config_updated",
-            {
-                "provider": config.get("semantic_embedding_provider"),
-                "model": config.get("semantic_embedding_model"),
-                "base_url": config.get("semantic_embedding_base_url"),
-                "api_key_configured": config.get("semantic_embedding_api_key_configured"),
-                "restart_required": config.get("restart_required"),
-            },
-        )
-    return config
-
-
-@app.get("/integrations/project-cortex/status")
-async def project_cortex_status():
-    service = await sop_adapter.status()
-    async with store._lock:
-        _set_service_status(service)
-        await store.persist()
-    return to_dict(service)
-
-
-@app.get("/integrations/project-cortex/config")
-async def project_cortex_config():
-    return sop_adapter.config()
-
-
-@app.post("/integrations/project-cortex/config")
-async def project_cortex_update_config(request: ProjectCortexConfigRequest):
-    try:
-        config = sop_adapter.update_config(
-            use_real=request.use_real,
-            service_base_url=request.service_base_url,
-            openai_base_url=request.openai_base_url,
-            openai_model=request.openai_model,
-            openai_api_key=request.openai_api_key,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens,
-            timeout_seconds=request.timeout_seconds,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    service = await sop_adapter.status()
-    async with store._lock:
-        _set_service_status(service)
-        await store.persist()
-        await store.publish(
-            "project_cortex_config_updated",
-            {
-                "use_real": config.get("use_real"),
-                "service_base_url": config.get("service_base_url"),
-                "openai_base_url": config.get("openai_base_url"),
-                "openai_model": config.get("openai_model"),
-                "api_key_configured": config.get("openai_api_key_configured"),
-            },
-        )
-    return config
-
-
 def _require_ownscribe_adapter():
     if ownscribe_adapter is None:
         raise HTTPException(status_code=503, detail="ownscribe adapter not installed")
@@ -1700,6 +1902,642 @@ async def ownscribe_audio_devices():
 async def ownscribe_preflight(network: bool = False):
     adapter = _require_ownscribe_adapter()
     return adapter.preflight(network=network)
+
+
+def _short_source_id(source_id: str | None) -> str:
+    if not source_id:
+        return "unknown"
+    return (source_id.split("_")[-1] or source_id)[:8]
+
+
+def _session_or_404(session_id: str) -> DemoSession:
+    if store.state.current_session and store.state.current_session.id == session_id:
+        return store.state.current_session
+    path = SESSION_DIR / f"{session_id}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Session not found.")
+    try:
+        return DemoSession(**json.loads(path.read_text(encoding="utf-8")))
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Unable to read session: {exc}") from exc
+
+
+def _task_or_404(task_id: str) -> ActiveTask:
+    try:
+        return store.get_task(task_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Active Task not found.") from exc
+
+
+def _skill_or_404(skill_id: str) -> SkillRecord:
+    for skill in store.state.skills:
+        if skill.id == skill_id:
+            return skill
+    raise HTTPException(status_code=404, detail="Skill not found.")
+
+
+def _note_excerpt(value: str, limit: int = 2_400) -> str:
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 40].rstrip() + "\n\n...[truncated by Hippo]"
+
+
+def _artifact_safe_for_memory(artifact: Artifact) -> bool:
+    kind = artifact.type.lower()
+    if any(blocked in kind for blocked in ("transcript", "audio", "recording", "timeline")):
+        return False
+    return any(allowed in kind for allowed in ("minutes", "summary", "action", "follow", "task", "skill"))
+
+
+def _artifact_memory_lines(artifact: Artifact) -> list[str]:
+    lines = [
+        f"### {artifact.title}",
+        f"- id: `{artifact.id}`",
+        f"- type: `{artifact.type}`",
+    ]
+    if artifact.path:
+        lines.append(f"- path: `{artifact.path}`")
+    if artifact.content and _artifact_safe_for_memory(artifact):
+        lines.extend(["", _note_excerpt(artifact.content)])
+    else:
+        lines.append("- content: omitted by Hippo Basic Memory policy")
+    return lines
+
+
+def _basic_memory_session_note(session: DemoSession) -> tuple[str, str, str]:
+    short_id = _short_source_id(session.id)
+    title = f"Hippo Session {short_id}"
+    lines = [
+        f"# {title}",
+        "",
+        "## Source",
+        f"- source_kind: session",
+        f"- source_id: `{session.id}`",
+        f"- title: {session.title}",
+        f"- started_at: {session.started_at}",
+        f"- ended_at: {session.ended_at or 'active'}",
+        "",
+        "## Summary",
+        f"Session captured by HippoDEMO. Raw transcript is intentionally not synced to Basic Memory v1.",
+    ]
+    memory_artifacts = session.artifacts
+    if memory_artifacts:
+        lines.extend(["", "## Artifacts"])
+        for artifact in memory_artifacts:
+            lines.extend(_artifact_memory_lines(artifact))
+            lines.append("")
+    if session.active_task_ids:
+        lines.extend(["## Relations"])
+        for task_id in session.active_task_ids:
+            lines.append(f"- has_task [[Hippo Task {_short_source_id(task_id)}]]")
+    return title, "hippo/sessions", "\n".join(lines).strip() + "\n"
+
+
+def _basic_memory_task_note(task: ActiveTask) -> tuple[str, str, str]:
+    short_id = _short_source_id(task.id)
+    title = f"Hippo Task {short_id}"
+    lines = [
+        f"# {title}",
+        "",
+        "## Source",
+        "- source_kind: active_task",
+        f"- source_id: `{task.id}`",
+        f"- source_session_id: `{task.source_session_id or ''}`",
+        f"- status: {task.status.value if hasattr(task.status, 'value') else task.status}",
+        f"- confidence: {task.confidence}",
+        f"- created_at: {task.created_at}",
+        f"- updated_at: {task.updated_at}",
+        "",
+        "## Intent",
+        task.intent,
+    ]
+    if task.proposed_actions:
+        lines.extend(["", "## Proposed Actions"])
+        for action in task.proposed_actions:
+            lines.append(
+                f"- {action.label} -> target: {action.target_type}; status: {action.status}; "
+                f"requires_confirmation: {action.requires_confirmation}"
+            )
+    if task.artifacts:
+        lines.extend(["", "## Supporting Artifacts"])
+        for artifact in task.artifacts:
+            lines.extend(_artifact_memory_lines(artifact))
+            lines.append("")
+    if task.source_session_id:
+        lines.extend(["## Relations", f"- from_session [[Hippo Session {_short_source_id(task.source_session_id)}]]"])
+    return title, "hippo/tasks", "\n".join(lines).strip() + "\n"
+
+
+def _basic_memory_skill_note(skill: SkillRecord) -> tuple[str, str, str]:
+    short_id = _short_source_id(skill.id)
+    title = f"Hippo Skill {short_id}"
+    skill_markdown = ""
+    if skill.path:
+        path = Path(skill.path)
+        if path.exists() and path.is_file():
+            skill_markdown = path.read_text(encoding="utf-8", errors="replace")
+    lines = [
+        f"# {title}",
+        "",
+        "## Source",
+        "- source_kind: skill",
+        f"- source_id: `{skill.id}`",
+        f"- skill_name: {skill.name}",
+        f"- source_session_id: `{skill.source_session_id or ''}`",
+        f"- check_in: {skill.check_in or ''}",
+        f"- check_out: {skill.check_out or ''}",
+        f"- adapter: {skill.metadata.get('adapter') or ''}",
+        "",
+        "## Summary",
+        skill.description,
+    ]
+    if skill.source_session_id:
+        lines.extend(["", "## Relations", f"- distilled_from [[Hippo Session {_short_source_id(skill.source_session_id)}]]"])
+    if skill_markdown:
+        lines.extend(["", "## Skill Artifact", _note_excerpt(skill_markdown, limit=12_000)])
+    return title, "hippo/skills", "\n".join(lines).strip() + "\n"
+
+
+def _basic_memory_vlmac_summary_note(summary: dict[str, Any]) -> tuple[str, str, str, str]:
+    source_id = str(summary.get("source_id") or "unknown")
+    epoch_ms = str(summary.get("epoch_ms") or summary.get("system_time_iso") or now_iso())
+    title = f"Hippo Video Summary {_short_source_id(source_id)} {str(summary.get('system_time_iso') or '')}".strip()
+    chunk_paths = summary.get("chunk_paths") if isinstance(summary.get("chunk_paths"), list) else []
+    lines = [
+        f"# {title}",
+        "",
+        "## Source",
+        "- source_kind: vlmac_video_summary",
+        f"- source_id: `{source_id}`",
+        f"- system_time_iso: {summary.get('system_time_iso') or ''}",
+        f"- epoch_ms: {summary.get('epoch_ms') or ''}",
+        f"- duration_seconds: {summary.get('duration_seconds') or 0}",
+        f"- frames_used: {summary.get('frames_used') or 0}",
+        f"- activity_events_count: {summary.get('activity_events_count') or 0}",
+        f"- summary_path: `{summary.get('source_path') or summary.get('summary_path') or ''}`",
+        "",
+        "## Summary",
+        _note_excerpt(str(summary.get("answer") or summary.get("summary") or ""), limit=12_000),
+    ]
+    if chunk_paths:
+        lines.extend(["", "## Evidence Chunks"])
+        for path in chunk_paths[:20]:
+            lines.append(f"- `{path}`")
+    return title, "hippo/context/video/summaries", "\n".join(lines).strip() + "\n", f"{source_id}:{epoch_ms}"
+
+
+def _vlmac_artifact_from_summary(summary: dict[str, Any]) -> Artifact | None:
+    answer = str(summary.get("answer") or summary.get("summary") or "").strip()
+    if not answer:
+        return None
+    source_id = str(summary.get("source_id") or "unknown")
+    system_time = str(summary.get("system_time_iso") or "")
+    chunk_paths = summary.get("chunk_paths") if isinstance(summary.get("chunk_paths"), list) else []
+    content = "\n".join(
+        [
+            f"# VLMac Video Summary {system_time}".strip(),
+            "",
+            "## Source",
+            f"- source_id: `{source_id}`",
+            f"- system_time_iso: {system_time}",
+            f"- epoch_ms: {summary.get('epoch_ms') or ''}",
+            f"- duration_seconds: {summary.get('duration_seconds') or 0}",
+            f"- frames_used: {summary.get('frames_used') or 0}",
+            f"- activity_events_count: {summary.get('activity_events_count') or 0}",
+            "",
+            "## Summary",
+            answer,
+            "",
+            "## Evidence Chunks",
+            *(f"- `{path}`" for path in chunk_paths[:20]),
+            "",
+        ]
+    )
+    return Artifact(
+        type="vlmac_video_summary",
+        title=f"vlmac video summary {system_time}".strip(),
+        content=content,
+        metadata={
+            "source": "vlmac",
+            "source_id": source_id,
+            "system_time_iso": system_time,
+            "epoch_ms": summary.get("epoch_ms"),
+            "summary_path": summary.get("source_path") or summary.get("summary_path"),
+            "chunk_paths": chunk_paths,
+        },
+    )
+
+
+async def _publish_basic_memory_sync_result(
+    result: dict[str, Any],
+    *,
+    kind: str,
+    source_id: str,
+    session_id: str | None = None,
+) -> None:
+    await store.publish(
+        "basic_memory_note_written",
+        {
+            "kind": kind,
+            "source_id": source_id,
+            "status": result.get("status"),
+            "identifier": result.get("identifier") or result.get("permalink"),
+            "path": result.get("path"),
+        },
+        session_id=session_id,
+    )
+
+
+async def _sync_basic_memory_session(session: DemoSession) -> dict[str, Any]:
+    title, folder, content = _basic_memory_session_note(session)
+    result = await basic_memory_adapter.write_note(
+        kind="session",
+        source_id=session.id,
+        title=title,
+        folder=folder,
+        content=content,
+    )
+    await _publish_basic_memory_sync_result(result, kind="session", source_id=session.id, session_id=session.id)
+    return result
+
+
+async def _sync_basic_memory_task(task: ActiveTask) -> dict[str, Any]:
+    title, folder, content = _basic_memory_task_note(task)
+    result = await basic_memory_adapter.write_note(
+        kind="task",
+        source_id=task.id,
+        title=title,
+        folder=folder,
+        content=content,
+    )
+    await _publish_basic_memory_sync_result(result, kind="task", source_id=task.id, session_id=task.source_session_id)
+    return result
+
+
+async def _sync_basic_memory_skill(skill: SkillRecord) -> dict[str, Any]:
+    title, folder, content = _basic_memory_skill_note(skill)
+    result = await basic_memory_adapter.write_note(
+        kind="skill",
+        source_id=skill.id,
+        title=title,
+        folder=folder,
+        content=content,
+    )
+    await _publish_basic_memory_sync_result(result, kind="skill", source_id=skill.id, session_id=skill.source_session_id)
+    return result
+
+
+async def _sync_basic_memory_vlmac_summary(summary: dict[str, Any], session_id: str | None = None) -> dict[str, Any]:
+    title, folder, content, source_key = _basic_memory_vlmac_summary_note(summary)
+    result = await basic_memory_adapter.write_note(
+        kind="vlmac_video_summary",
+        source_id=source_key,
+        title=title,
+        folder=folder,
+        content=content,
+    )
+    await _publish_basic_memory_sync_result(result, kind="vlmac_video_summary", source_id=source_key, session_id=session_id)
+    return result
+
+
+async def _sync_basic_memory_task_best_effort(task: ActiveTask) -> None:
+    try:
+        await _sync_basic_memory_task(task)
+        if task.source_session_id:
+            await _sync_basic_memory_session(_session_or_404(task.source_session_id))
+    except Exception as exc:
+        await store.publish(
+            "basic_memory_sync_failed",
+            {"kind": "task", "source_id": task.id, "detail": str(exc)},
+            session_id=task.source_session_id,
+        )
+
+
+async def _sync_basic_memory_skill_best_effort(skill: SkillRecord) -> None:
+    try:
+        await _sync_basic_memory_skill(skill)
+    except Exception as exc:
+        await store.publish(
+            "basic_memory_sync_failed",
+            {"kind": "skill", "source_id": skill.id, "detail": str(exc)},
+            session_id=skill.source_session_id,
+        )
+
+
+@app.get("/integrations/basic-memory/config")
+async def basic_memory_config():
+    return basic_memory_adapter.config()
+
+
+@app.get("/integrations/basic-memory/status")
+async def basic_memory_status():
+    service = await basic_memory_adapter.status()
+    async with store._lock:
+        await _apply_basic_memory_status(service)
+        return _basic_memory_status_payload(service)
+
+
+@app.post("/integrations/basic-memory/setup")
+async def basic_memory_setup():
+    try:
+        result = await basic_memory_adapter.setup()
+    except Exception as exc:
+        service = ServiceStatus(name="basic-memory", status="error", detail=str(exc))
+        async with store._lock:
+            await _apply_basic_memory_status(service)
+            await store.publish("basic_memory_sync_failed", {"kind": "setup", "detail": str(exc)})
+        raise HTTPException(status_code=502, detail=f"basic-memory setup failed: {exc}") from exc
+
+    service = await basic_memory_adapter.status()
+    async with store._lock:
+        await _apply_basic_memory_status(service)
+        await store.publish(
+            "basic_memory_setup_completed",
+            {
+                "status": service.status,
+                "project": result.get("project"),
+                "project_path": result.get("project_path"),
+                "added": result.get("added"),
+            },
+        )
+    return {**result, "service": _service_payload(service)}
+
+
+@app.get("/integrations/basic-memory/search")
+async def basic_memory_search(query: str, limit: int = 10):
+    try:
+        result = await basic_memory_adapter.search(query=query, limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"basic-memory search failed: {exc}") from exc
+    await store.publish(
+        "basic_memory_search_completed",
+        {"query": query, "result_count": len(result.get("results") or [])},
+    )
+    return result
+
+
+@app.get("/integrations/basic-memory/recent")
+async def basic_memory_recent(limit: int = 10):
+    try:
+        return await basic_memory_adapter.recent(limit=limit)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"basic-memory recent failed: {exc}") from exc
+
+
+@app.get("/integrations/basic-memory/note/{identifier:path}")
+async def basic_memory_note(identifier: str):
+    try:
+        return await basic_memory_adapter.read_note(identifier)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"basic-memory read note failed: {exc}") from exc
+
+
+@app.post("/integrations/basic-memory/sync-session/{session_id}")
+async def basic_memory_sync_session(session_id: str):
+    session = _session_or_404(session_id)
+    try:
+        return await _sync_basic_memory_session(session)
+    except Exception as exc:
+        await store.publish("basic_memory_sync_failed", {"kind": "session", "source_id": session_id, "detail": str(exc)}, session_id=session_id)
+        raise HTTPException(status_code=502, detail=f"basic-memory sync session failed: {exc}") from exc
+
+
+@app.post("/integrations/basic-memory/sync-task/{task_id}")
+async def basic_memory_sync_task(task_id: str):
+    task = _task_or_404(task_id)
+    try:
+        return await _sync_basic_memory_task(task)
+    except Exception as exc:
+        await store.publish("basic_memory_sync_failed", {"kind": "task", "source_id": task_id, "detail": str(exc)}, session_id=task.source_session_id)
+        raise HTTPException(status_code=502, detail=f"basic-memory sync task failed: {exc}") from exc
+
+
+@app.post("/integrations/basic-memory/sync-skill/{skill_id}")
+async def basic_memory_sync_skill(skill_id: str):
+    skill = _skill_or_404(skill_id)
+    try:
+        return await _sync_basic_memory_skill(skill)
+    except Exception as exc:
+        await store.publish("basic_memory_sync_failed", {"kind": "skill", "source_id": skill_id, "detail": str(exc)}, session_id=skill.source_session_id)
+        raise HTTPException(status_code=502, detail=f"basic-memory sync skill failed: {exc}") from exc
+
+
+@app.post("/integrations/basic-memory/sync-context/{fragment_id}")
+async def basic_memory_sync_context(fragment_id: str):
+    try:
+        fragment = store.get_context_fragment(fragment_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown context fragment: {fragment_id}") from exc
+    try:
+        return await _sync_basic_memory_context(fragment)
+    except Exception as exc:
+        await store.publish(
+            "context_fragment_sync_failed",
+            {
+                **_context_fragment_event_payload(fragment, status="failed"),
+                "detail": str(exc),
+            },
+            session_id=fragment.session_id,
+        )
+        raise HTTPException(status_code=502, detail=f"basic-memory sync context failed: {exc}") from exc
+
+
+@app.get("/integrations/project-cortex/agent/status")
+async def project_cortex_agent_status():
+    async with store._lock:
+        return await _apply_hippo_agent_status()
+
+
+@app.post("/chat/session")
+async def unified_chat_create_session(request: AiManusCreateSessionRequest | None = None):
+    title = request.title if request and request.title else "Hippo Chat"
+    thread = AiManusThread(
+        session_id=new_id("chat_thread"),
+        title=title,
+        status="active",
+        metadata={
+            "source": "hippo-chat",
+            "primary_route": "auto",
+            **_ai_manus_link_metadata(),
+        },
+    )
+    async with store._lock:
+        await store.save_ai_manus_thread(thread)
+        await _apply_hippo_agent_status()
+        await store.publish(
+            "chat_session_created",
+            {"session_id": thread.session_id, "primary_route": "auto"},
+            session_id=thread.session_id,
+        )
+    return {"session_id": thread.session_id, "thread": _ai_manus_thread_summary(thread)}
+
+
+@app.post("/chat/session/{session_id}/message")
+async def unified_chat_message(session_id: str, request: AiManusChatRequest):
+    route = _chat_route_for_message(request.message or "", request.route)
+    await store.publish(
+        "chat_route_selected",
+        {
+            "session_id": session_id,
+            "route": route,
+            "message_chars": len(request.message or ""),
+            "requested_route": request.route or "auto",
+        },
+        session_id=session_id,
+    )
+    if route == "hippo_agent":
+        return StreamingResponse(_stream_hippo_agent_chat(session_id, request), media_type="text/event-stream")
+    return await ai_manus_chat(session_id, request)
+
+
+async def _stream_hippo_agent_chat(session_id: str, request: AiManusChatRequest) -> AsyncGenerator[str, None]:
+    try:
+        thread = store.get_ai_manus_thread(session_id)
+    except KeyError:
+        yield _sse("error", {"error": f"Unknown chat thread: {session_id}"})
+        return
+
+    thread = _refresh_ai_manus_thread_links(thread)
+    thread.metadata["last_route"] = "hippo_agent"
+    await store.save_ai_manus_thread(thread)
+
+    status = await _apply_hippo_agent_status()
+    if not status.get("api_key_configured"):
+        await store.publish("project_cortex_agent_failed", {"session_id": session_id, "detail": status.get("detail")}, session_id=session_id)
+        yield _sse("error", {"error": status.get("detail") or "hippo_agent is not configured"})
+        return
+
+    message = (request.message or "").strip()
+    if not message:
+        yield _sse("error", {"error": "message is required"})
+        return
+
+    conversation_id = str(thread.metadata.get("hippo_agent_conversation_id") or "")
+    message_id: str | None = None
+    full_answer = ""
+    event_count = 0
+
+    try:
+        await store.append_ai_manus_message(
+            session_id,
+            AiManusThreadMessage(
+                role="user",
+                content=message,
+                event_id=request.event_id,
+                attachments=request.attachments or [],
+            ),
+        )
+        await store.publish(
+            "project_cortex_agent_started",
+            {"session_id": session_id, "message_chars": len(message)},
+            session_id=session_id,
+        )
+
+        async for sse_event in hippo_agent_adapter.stream_chat(
+            query=message,
+            skill=_hippo_agent_skill_input(message),
+            context=_hippo_agent_context_input(message, session_id),
+            conversation_id=conversation_id or None,
+            files=None,
+        ):
+            event_count += 1
+            data = sse_event.get("data") if isinstance(sse_event, dict) else {}
+            if not isinstance(data, dict):
+                continue
+            raw_event = str(data.get("event") or sse_event.get("event") or "message")
+
+            if raw_event in {"message", "agent_message"}:
+                chunk = str(data.get("answer") or "")
+                if chunk:
+                    full_answer += chunk
+                    conversation_id = str(data.get("conversation_id") or conversation_id or "")
+                    if not message_id:
+                        message_id = str(data.get("message_id") or sse_event.get("id") or new_id("hippo_agent_message"))
+                    yield _sse(
+                        "message_delta",
+                        {
+                            "role": "assistant",
+                            "content": chunk,
+                            "source": "hippo_agent",
+                            "event_id": message_id,
+                            "timestamp": int(time.time()),
+                        },
+                        event_id=message_id or None,
+                    )
+                continue
+
+            if raw_event == "agent_thought":
+                thought_id = str(data.get("id") or f"hippo_agent_thought_{data.get('position') or event_count}")
+                tool_payload = {
+                    "tool_call_id": thought_id,
+                    "name": data.get("tool") or "HippoAgent",
+                    "function": data.get("thought") or data.get("tool") or "agent_thought",
+                    "status": "completed" if data.get("observation") else "running",
+                    "args": {"tool_input": data.get("tool_input") or ""},
+                    "content": {
+                        "thought": data.get("thought") or "",
+                        "observation": data.get("observation") or "",
+                        "message_files": data.get("message_files") or [],
+                        "source": "hippo_agent",
+                    },
+                    "timestamp": int(time.time()),
+                    "event_id": thought_id,
+                }
+                await store.append_ai_manus_event(session_id, AiManusThreadEvent(event="tool", data=tool_payload, event_id=thought_id))
+                await store.publish(
+                    "project_cortex_agent_thought",
+                    {
+                        "session_id": session_id,
+                        "tool_call_id": thought_id,
+                        "tool": tool_payload["name"],
+                        "status": tool_payload["status"],
+                    },
+                    session_id=session_id,
+                )
+                yield _sse("tool", tool_payload, event_id=thought_id)
+                continue
+
+            if raw_event == "message_end":
+                conversation_id = str(data.get("conversation_id") or conversation_id or "")
+                message_id = str(data.get("id") or message_id or "")
+                continue
+
+            if raw_event == "error":
+                raise RuntimeError(str(data.get("message") or data.get("error") or "hippo_agent error"))
+
+        if full_answer:
+            await store.append_ai_manus_message(
+                session_id,
+                AiManusThreadMessage(role="assistant", content=full_answer, event_id=message_id or None),
+            )
+        thread = store.get_ai_manus_thread(session_id)
+        if conversation_id:
+            thread.metadata["hippo_agent_conversation_id"] = conversation_id
+        thread.metadata["last_route"] = "hippo_agent"
+        thread.status = "active"
+        await store.save_ai_manus_thread(thread)
+        await store.publish(
+            "project_cortex_agent_completed",
+            {"session_id": session_id, "event_count": event_count, "answer_chars": len(full_answer)},
+            session_id=session_id,
+        )
+        yield _sse(
+            "message_complete",
+            {
+                "source": "hippo_agent",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+                "content_chars": len(full_answer),
+            },
+        )
+    except Exception as exc:
+        try:
+            await store.append_ai_manus_event(session_id, AiManusThreadEvent(event="error", data={"error": str(exc), "source": "hippo_agent"}))
+        except KeyError:
+            pass
+        await store.publish("project_cortex_agent_failed", {"session_id": session_id, "detail": str(exc)}, session_id=session_id)
+        yield _sse("error", {"error": str(exc), "source": "hippo_agent"})
 
 
 @app.get("/integrations/ai-manus/config")
@@ -1945,6 +2783,9 @@ async def ai_manus_chat(session_id: str, request: AiManusChatRequest):
         message_chars = len(request.message or "")
         attachments_count = len(request.attachments or [])
         try:
+            thread = await _ensure_ai_manus_remote_session(thread)
+            thread.metadata["last_route"] = "ai_manus"
+            await store.save_ai_manus_thread(thread)
             if request.message:
                 await store.append_ai_manus_message(
                     session_id,
@@ -2226,25 +3067,126 @@ async def cua_target_surface():
     return _target_surface_payload(surface)
 
 
+@app.get("/integrations/vlmac/status")
+async def vlmac_status():
+    service = await vlmac_adapter.status()
+    async with store._lock:
+        await _apply_vlmac_status(service)
+        return to_dict(service)
+
+
+@app.get("/integrations/vlmac/config")
+async def vlmac_config():
+    return vlmac_adapter.config()
+
+
+@app.post("/integrations/vlmac/config")
+async def vlmac_update_config(request: VlmacConfigRequest):
+    try:
+        config = vlmac_adapter.update_config(
+            vlm_base_url=request.vlm_base_url,
+            vlm_model=request.vlm_model,
+            vlm_api_key=request.vlm_api_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    service = await vlmac_adapter.status()
+    async with store._lock:
+        await _apply_vlmac_status(service)
+        await store.publish("vlmac_config_updated", {"config": config, "service": to_dict(service)})
+    return config
+
+
+@app.get("/integrations/vlmac/preflight")
+async def vlmac_preflight(network: bool = False):
+    return await vlmac_adapter.preflight(network=network)
+
+
+async def _vlmac_command_snapshot(action: str, command) -> dict:
+    service = await command()
+    async with store._lock:
+        await _apply_vlmac_status(service)
+        await store.publish("vlmac_command", {"action": action, "service": to_dict(service), "config": vlmac_adapter.config()})
+        return state_payload()
+
+
+@app.post("/integrations/vlmac/start")
+async def vlmac_start():
+    return await _vlmac_command_snapshot("start", vlmac_adapter.start)
+
+
+@app.post("/integrations/vlmac/stop")
+async def vlmac_stop():
+    return await _vlmac_command_snapshot("stop", vlmac_adapter.stop)
+
+
+@app.post("/integrations/vlmac/restart")
+async def vlmac_restart():
+    return await _vlmac_command_snapshot("restart", vlmac_adapter.restart)
+
+
+@app.post("/integrations/vlmac/ingest")
+async def vlmac_ingest():
+    result = await vlmac_adapter.ingest()
+    persisted_artifacts: list[Artifact] = []
+    sync_results: list[dict[str, Any]] = []
+    session = store.state.current_session
+
+    for summary in result.summaries:
+        try:
+            sync_results.append(await _sync_basic_memory_vlmac_summary(summary, session_id=session.id if session else None))
+        except Exception as exc:
+            await store.publish(
+                "basic_memory_sync_failed",
+                {"kind": "vlmac_video_summary", "detail": str(exc)},
+                session_id=session.id if session else None,
+            )
+
+    async with store._lock:
+        session = store.state.current_session
+        for summary in result.summaries:
+            artifact = _vlmac_artifact_from_summary(summary)
+            if artifact is None:
+                continue
+            persisted = await store.add_artifact(artifact, session=session)
+            persisted_artifacts.append(persisted)
+            await store.publish("artifact_ready", to_dict(persisted), session_id=session.id if session else None)
+        if persisted_artifacts:
+            await store.publish(
+                "vlmac_artifacts_ingested",
+                {
+                    "artifact_ids": [artifact.id for artifact in persisted_artifacts],
+                    "summary_count": len(result.summaries),
+                    "basic_memory_sync_count": len(sync_results),
+                    "rolling_context_path": result.rolling_context_path,
+                },
+                session_id=session.id if session else None,
+            )
+        else:
+            await store.publish(
+                "vlmac_capture_unavailable",
+                {"detail": result.detail, "rolling_context_path": result.rolling_context_path},
+                session_id=session.id if session else None,
+            )
+    return {
+        "ok": result.ok,
+        "detail": result.detail,
+        "summary_count": len(result.summaries),
+        "artifact_ids": [artifact.id for artifact in persisted_artifacts],
+        "basic_memory_sync_count": len(sync_results),
+        "rolling_context_path": result.rolling_context_path,
+    }
+
+
 @app.post("/intervention/detect")
 async def intervention_detect():
     surface = await cua_driver_adapter.target_surface()
-    snapshot = _snapshot_from_surface(surface)
-    wechat_intent = _wechat_intent_from_snapshot(snapshot)
-    mail_ready = _mail_compose_ready_from_snapshot(snapshot)
     async with store._lock:
-        store.state.frontmost_context = snapshot
         task = _current_task()
         if not task:
             await store.publish(
                 "intervention_signal_idle",
-                {
-                    "target_surface": _target_surface_payload(surface),
-                    "frontmost_context": to_dict(snapshot),
-                    "wechat_intent": wechat_intent,
-                    "mail_compose_ready": mail_ready,
-                    "reason": "no_active_task",
-                },
+                {"target_surface": _target_surface_payload(surface), "reason": "no_active_task"},
             )
             return state_payload()
 
@@ -2257,135 +3199,10 @@ async def intervention_detect():
             {
                 "task_id": task.id,
                 "target_surface": _target_surface_payload(surface),
-                "frontmost_context": to_dict(snapshot),
-                "wechat_intent": wechat_intent,
-                "mail_compose_ready": mail_ready,
             },
             session_id=task.source_session_id,
         )
-        if wechat_intent:
-            await store.publish("wechat_intent_detected", wechat_intent, session_id=task.source_session_id)
-        if mail_ready:
-            await store.publish(
-                "mail_compose_detected",
-                {"target_surface": _target_surface_payload(surface), "frontmost_context": to_dict(snapshot)},
-                session_id=task.source_session_id,
-            )
         return state_payload()
-
-
-@app.get("/context/frontmost", response_model=ForegroundAXSnapshot)
-async def frontmost_context():
-    surface = await cua_driver_adapter.target_surface()
-    snapshot = _snapshot_from_surface(surface)
-    async with store._lock:
-        await store.set_frontmost_context(snapshot)
-        await store.publish("frontmost_context_captured", to_dict(snapshot), session_id=snapshot.metadata.get("session_id"))
-    return snapshot
-
-
-@app.get("/frontmost", response_model=ForegroundAXSnapshot)
-async def frontmost_context_alias():
-    return await frontmost_context()
-
-
-@app.post("/highlight/start")
-async def highlight_start():
-    async with store._lock:
-        if store.state.highlight_segment and store.state.highlight_segment.status in {"capturing", "generating"}:
-            raise HTTPException(status_code=409, detail="Highlight is already active.")
-        session_id = store.state.current_session.id if store.state.current_session else None
-        check_in = now_iso()
-        segment = HighlightSegment(
-            check_in=check_in,
-            status="capturing",
-            source_session_id=session_id,
-        )
-        store.state.highlight_segment = segment
-        store.state.sop_capture.status = CaptureStatus.CAPTURING
-        store.state.sop_capture.check_in = check_in
-        store.state.sop_capture.check_out = None
-        store.state.sop_capture.source_session_id = session_id
-        store.state.sop_capture.generated_skill_id = None
-        store.state.sop_capture.error = None
-        await store.persist()
-        await store.publish("highlight_started", to_dict(segment), session_id=session_id)
-        return state_payload()
-
-
-@app.post("/highlight/finish")
-async def highlight_finish(request: CaptureFinishRequest | None = None):
-    async with store._lock:
-        segment = store.state.highlight_segment
-        if not segment or segment.status != "capturing":
-            raise HTTPException(status_code=409, detail="No active Highlight to finish.")
-        segment.status = "generating"
-        segment.check_out = request.check_out if request and request.check_out else now_iso()
-        store.state.sop_capture.status = CaptureStatus.GENERATING
-        store.state.sop_capture.check_out = segment.check_out
-        await store.persist()
-        await store.publish("highlight_generating", to_dict(segment), session_id=segment.source_session_id)
-
-    chunks = _memory_chunks_for_window(
-        session_id=segment.source_session_id,
-        start_at=segment.check_in,
-        end_at=segment.check_out,
-    )
-    priority = _context_priority(chunks)
-    if priority == "none":
-        async with store._lock:
-            segment.status = "failed"
-            segment.error = "No video_context or audio_context found in Highlight window."
-            store.state.sop_capture.status = CaptureStatus.FAILED
-            store.state.sop_capture.error = segment.error
-            await store.persist()
-            await store.publish("highlight_failed", to_dict(segment), session_id=segment.source_session_id)
-        raise HTTPException(status_code=409, detail=segment.error)
-
-    try:
-        skill = await generate_skill_record(
-            check_in=segment.check_in,
-            check_out=segment.check_out,
-            source_session_id=segment.source_session_id,
-            description=f"Generated from {priority} context in Highlight window.",
-        )
-    except Exception as exc:
-        async with store._lock:
-            segment.status = "failed"
-            segment.error = str(exc)
-            store.state.sop_capture.status = CaptureStatus.FAILED
-            store.state.sop_capture.error = str(exc)
-            await store.persist()
-            await store.publish("highlight_failed", to_dict(segment), session_id=segment.source_session_id)
-        raise HTTPException(status_code=502, detail=f"Highlight generation failed: {exc}") from exc
-
-    async with store._lock:
-        segment.status = "completed"
-        segment.context_priority = priority
-        segment.context_chunk_ids = [chunk.id for chunk in chunks]
-        segment.generated_skill_id = skill.id
-        skill.metadata.update(
-            {
-                "source": "highlight",
-                "context_priority": priority,
-                "context_chunk_ids": segment.context_chunk_ids,
-                "context_summary": _context_summary(chunks),
-            }
-        )
-        store.state.sop_capture.status = CaptureStatus.COMPLETED
-        store.state.sop_capture.generated_skill_id = skill.id
-        store.state.sop_capture.error = None
-        await store.persist()
-        await store.publish("highlight_finished", to_dict(segment), session_id=segment.source_session_id)
-        return state_payload()
-
-
-@app.post("/highlight")
-async def highlight_toggle():
-    segment = store.state.highlight_segment
-    if segment and segment.status == "capturing":
-        return await highlight_finish()
-    return await highlight_start()
 
 
 @app.post("/sop/capture-start")
@@ -2407,6 +3224,8 @@ async def capture_start():
 
 @app.post("/sop/capture-finish")
 async def capture_finish(request: CaptureFinishRequest | None = None):
+    skill_to_sync: SkillRecord | None = None
+    response: dict[str, Any] | None = None
     async with store._lock:
         capture = store.state.sop_capture
         if capture.status != CaptureStatus.CAPTURING:
@@ -2426,83 +3245,17 @@ async def capture_finish(request: CaptureFinishRequest | None = None):
             capture.error = None
             await store.persist()
             await store.publish("sop_capture_finished", to_dict(capture), session_id=capture.source_session_id)
-            return state_payload()
+            skill_to_sync = SkillRecord(**to_dict(skill))
+            response = state_payload()
         except Exception as exc:
             capture.status = CaptureStatus.FAILED
             capture.error = str(exc)
             await store.persist()
             await store.publish("sop_capture_failed", to_dict(capture), session_id=capture.source_session_id)
             raise HTTPException(status_code=502, detail=f"SOP generation failed: {exc}") from exc
-
-
-@app.post("/follow-up/prepare", response_model=FollowUpPackage)
-async def follow_up_prepare():
-    async with store._lock:
-        session = store.state.current_session
-        if not session:
-            raise HTTPException(status_code=409, detail="No active session available for follow-up preparation.")
-        chunks = _memory_chunks_for_window(session_id=session.id, start_at=session.started_at, end_at=now_iso())
-        priority = _context_priority(chunks)
-        context = _context_summary(chunks, limit=10)
-        if not context:
-            context = "\n".join(
-                artifact.content or ""
-                for artifact in session.artifacts
-                if artifact.type in {"meeting_minutes", "meeting_transcript", "follow_up_body"}
-            ).strip()
-        if not context:
-            raise HTTPException(status_code=409, detail="No BasicMemory context or session artifacts available for follow-up.")
-
-        subject = f"Follow-up: {session.title}"
-        body = (
-            "Hi,\n\n"
-            "Thanks again for the conversation. I captured the main context below for review before sending.\n\n"
-            f"{context}\n\n"
-            "Best,\n"
-        )
-        minutes = Artifact(
-            type="meeting_minutes",
-            title="Follow-up context summary",
-            content=f"# Follow-up Context\n\n{context}\n",
-            metadata={
-                "source": "basic-memory" if chunks else "session_artifacts",
-                "context_priority": priority,
-            },
-        )
-        follow_up_artifact = Artifact(
-            type="follow_up_body",
-            title="Mail follow-up draft",
-            content=body,
-            metadata={
-                "source": "follow_up_package",
-                "subject": subject,
-                "context_priority": priority,
-            },
-        )
-        persisted_minutes = await store.add_artifact(minutes, session=session)
-        persisted_follow_up = await store.add_artifact(follow_up_artifact, session=session)
-        package = FollowUpPackage(
-            subject=subject,
-            body=body,
-            minutes_path=persisted_minutes.path,
-            context_priority=priority,
-            source_session_id=session.id,
-            context_chunk_ids=[chunk.id for chunk in chunks],
-            metadata={"artifact_ids": [persisted_minutes.id, persisted_follow_up.id]},
-        )
-        store.state.follow_up_package = package
-        task = build_active_task(session, [persisted_minutes, persisted_follow_up], target_type="mail")
-        await store.add_active_task(task)
-        store.state.jarvis_state = JarvisState.INTERVENTION_READY
-        await store.persist()
-        await store.publish("follow_up_prepared", to_dict(package), session_id=session.id)
-        await store.publish("active_task_generated", to_dict(task), session_id=session.id)
-        return package
-
-
-@app.post("/follow-up", response_model=FollowUpPackage)
-async def follow_up_prepare_alias():
-    return await follow_up_prepare()
+    if skill_to_sync:
+        await _sync_basic_memory_skill_best_effort(skill_to_sync)
+    return response or state_payload()
 
 
 @app.post("/active-task/generate")
@@ -2603,91 +3356,6 @@ async def active_task_confirm(task_id: str):
         return state_payload()
 
 
-@app.post("/active-task/{task_id}/insert-mail-draft", response_model=MailDraftInsertResult)
-async def active_task_insert_mail_draft(task_id: str):
-    async with store._lock:
-        try:
-            task = store.get_task(task_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Active Task not found.") from exc
-        insert_action, fallback_text = _insert_action_and_text(task)
-        if insert_action is None:
-            raise HTTPException(status_code=409, detail="Active Task has no insert action.")
-        package = store.state.follow_up_package
-        subject = package.subject if package and package.source_session_id == task.source_session_id else task.title
-        body = package.body if package and package.source_session_id == task.source_session_id else fallback_text
-        if not body or not body.strip():
-            raise HTTPException(status_code=409, detail="No follow-up body is available for Mail draft insertion.")
-        insert_action.status = "insert_requested"
-        task.status = ActiveTaskStatus.CONFIRMED
-        task.updated_at = now_iso()
-        await store.persist()
-        await store.publish(
-            "mail_draft_insert_requested",
-            {"task_id": task.id, "action_id": insert_action.id, "subject": subject},
-            session_id=task.source_session_id,
-        )
-
-    surface = await cua_driver_adapter.mail_compose_surface()
-    text = f"{subject.strip()}\n\n{body.strip()}" if subject.strip() else body.strip()
-    result = await cua_driver_adapter.insert_text(text, surface_hint=surface) if surface.safe else None
-    if result is None:
-        mail_result = MailDraftInsertResult(
-            ok=False,
-            detail=f"Mail compose surface is not ready: {surface.reason}",
-            target_surface=surface,
-        )
-    else:
-        detail = result.detail
-        if result.ok:
-            detail = f"{detail}; mail_compose_only=true; send_action=false"
-        mail_result = MailDraftInsertResult(
-            ok=result.ok,
-            detail=detail,
-            target_surface=surface,
-            metadata=_cua_result_payload(result),
-        )
-
-    async with store._lock:
-        try:
-            task = store.get_task(task_id)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail="Active Task not found.") from exc
-        insert_action, _ = _insert_action_and_text(task)
-        if insert_action is None:
-            raise HTTPException(status_code=409, detail="Active Task has no insert action.")
-        insert_action.payload["mail_draft_insert_result"] = to_dict(mail_result)
-        insert_action.status = "inserted" if mail_result.ok else "insert_failed"
-        task.status = ActiveTaskStatus.AWAITING_REVIEW if mail_result.ok else ActiveTaskStatus.PENDING
-        task.updated_at = now_iso()
-        store.state.mail_draft_insert_result = mail_result
-        store.state.jarvis_state = JarvisState.AWAITING_REVIEW if mail_result.ok else JarvisState.INTERVENTION_READY
-        await _apply_cua_status(
-            ServiceStatus(
-                name="cua-driver",
-                status="online" if mail_result.ok else "error",
-                detail=mail_result.detail,
-            )
-        )
-        await store.persist()
-        await store.publish(
-            "mail_draft_inserted" if mail_result.ok else "mail_draft_insert_failed",
-            {"task_id": task.id, "result": to_dict(mail_result)},
-            session_id=task.source_session_id,
-        )
-        if not mail_result.ok:
-            raise HTTPException(status_code=502, detail=f"Mail draft insert failed: {mail_result.detail}")
-        return mail_result
-
-
-@app.post("/mail-draft", response_model=MailDraftInsertResult)
-async def active_task_insert_mail_draft_alias():
-    task = _current_task()
-    if not task:
-        raise HTTPException(status_code=409, detail="No active task available for Mail draft insertion.")
-    return await active_task_insert_mail_draft(task.id)
-
-
 @app.post("/active-task/{task_id}/ignore")
 async def active_task_ignore(task_id: str):
     async with store._lock:
@@ -2704,6 +3372,8 @@ async def active_task_ignore(task_id: str):
 
 @app.post("/active-task/{task_id}/complete")
 async def active_task_complete(task_id: str):
+    task_to_sync: ActiveTask | None = None
+    response: dict[str, Any] | None = None
     async with store._lock:
         try:
             task = store.get_task(task_id)
@@ -2714,11 +3384,17 @@ async def active_task_complete(task_id: str):
         store.state.jarvis_state = JarvisState.PATTERN_DETECTED
         await store.persist()
         await store.publish("active_task_completed", to_dict(task), session_id=task.source_session_id)
-        return state_payload()
+        task_to_sync = ActiveTask(**to_dict(task))
+        response = state_payload()
+    if task_to_sync:
+        await _sync_basic_memory_task_best_effort(task_to_sync)
+    return response or state_payload()
 
 
 @app.post("/skill/generate")
 async def skill_generate(request: SkillGenerateRequest | None = None):
+    skill_to_sync: SkillRecord | None = None
+    response: dict[str, Any] | None = None
     async with store._lock:
         session_id = request.source_session_id if request else None
         if not session_id and store.state.current_session:
@@ -2730,7 +3406,11 @@ async def skill_generate(request: SkillGenerateRequest | None = None):
             name=request.name if request else None,
             description=request.description if request else None,
         )
-        return state_payload()
+        skill_to_sync = SkillRecord(**to_dict(skill))
+        response = state_payload()
+    if skill_to_sync:
+        await _sync_basic_memory_skill_best_effort(skill_to_sync)
+    return response or state_payload()
 
 
 @app.get("/skills")

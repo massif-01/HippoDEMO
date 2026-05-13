@@ -19,37 +19,10 @@ struct SettingsView: View {
     @State private var aiManusTemperatureDraft = ""
     @State private var aiManusMaxTokensDraft = ""
     @State private var aiManusExtraHeadersDraft = ""
-    @State private var openChronicleModelDraft = ""
-    @State private var openChronicleBaseURLDraft = ""
-    @State private var openChronicleKeyEnvDraft = ""
-    @State private var openChronicleKeyDraft = ""
-    @State private var openChronicleMaxTokensDraft = ""
-    @State private var openChronicleStageDraft = "default"
-    @State private var vlmacServiceBaseURLDraft = ""
-    @State private var vlmacVLLMBaseURLDraft = ""
+    @State private var vlmacBaseURLDraft = ""
     @State private var vlmacModelDraft = ""
     @State private var vlmacKeyDraft = ""
-    @State private var vlmacTemperatureDraft = ""
-    @State private var vlmacMaxTokensDraft = ""
-    @State private var vlmacTimeoutDraft = ""
-    @State private var basicMemorySemanticEnabledDraft = true
-    @State private var basicMemoryProviderDraft = ""
-    @State private var basicMemoryModelDraft = ""
-    @State private var basicMemoryBaseURLDraft = ""
-    @State private var basicMemoryKeyEnvDraft = ""
-    @State private var basicMemoryKeyDraft = ""
-    @State private var basicMemoryDimensionsDraft = ""
-    @State private var basicMemoryBatchSizeDraft = ""
-    @State private var basicMemoryConcurrencyDraft = ""
-    @State private var basicMemoryTimeoutDraft = ""
-    @State private var projectCortexUseRealDraft = false
-    @State private var projectCortexServiceBaseURLDraft = ""
-    @State private var projectCortexOpenAIBaseURLDraft = ""
-    @State private var projectCortexModelDraft = ""
-    @State private var projectCortexKeyDraft = ""
-    @State private var projectCortexTemperatureDraft = ""
-    @State private var projectCortexMaxTokensDraft = ""
-    @State private var projectCortexTimeoutDraft = ""
+    @State private var basicMemorySearchDraft = ""
 
     private let serviceColumns = [
         GridItem(.adaptive(minimum: 210), spacing: 10, alignment: .top)
@@ -63,9 +36,9 @@ struct SettingsView: View {
                 serviceMatrix
                 ownscribeAudioConsole
                 aiManusRuntimeConsole
-                projectCortexSkillConsole
-                basicMemoryEmbeddingConsole
-                vlmacRuntimeConsole
+                basicMemoryConsole
+                contextMemoryConsole
+                vlmacConsole
                 openChronicleConsole
                 cuaDriverConsole
                 secondaryControls
@@ -78,13 +51,12 @@ struct SettingsView: View {
             await store.bootstrap()
             await store.refreshOwnscribeConsole()
             await store.refreshManus()
-            await store.refreshProviderConsoles()
+            await store.refreshBasicMemory()
+            await store.refreshContextFragments()
+            await store.refreshVlmacPreflight()
             syncProviderDrafts()
             syncAiManusDrafts()
-            syncOpenChronicleDrafts()
             syncVlmacDrafts()
-            syncBasicMemoryDrafts()
-            syncProjectCortexDrafts()
         }
         .onChange(of: store.ownscribeConfig) {
             syncProviderDrafts()
@@ -92,17 +64,8 @@ struct SettingsView: View {
         .onChange(of: store.aiManusConfig) {
             syncAiManusDrafts()
         }
-        .onChange(of: store.openChronicleModelConfig) {
-            syncOpenChronicleDrafts()
-        }
         .onChange(of: store.vlmacConfig) {
             syncVlmacDrafts()
-        }
-        .onChange(of: store.basicMemoryEmbeddingConfig) {
-            syncBasicMemoryDrafts()
-        }
-        .onChange(of: store.projectCortexConfig) {
-            syncProjectCortexDrafts()
         }
     }
 
@@ -288,7 +251,7 @@ struct SettingsView: View {
             Divider()
 
             HStack(spacing: 8) {
-                Text("OpenAI Compatible API · ownscribe ASR + Summary")
+                Text(store.text(.runtimeProvider))
                     .font(.caption)
                     .fontWeight(.medium)
                     .foregroundStyle(.secondary)
@@ -327,8 +290,44 @@ struct SettingsView: View {
         }
     }
 
+    private var vlmacProviderControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text("VLM OpenAI API")
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+                statusBadge(
+                    store.vlmacConfig.vlmApiKeyConfigured == true ? "available" : "stopped",
+                    title: store.vlmacConfig.vlmApiKeyConfigured == true ? "API key saved" : "local or no-key"
+                )
+            }
+
+            LazyVGrid(columns: [
+                GridItem(.flexible(), spacing: 10),
+                GridItem(.flexible(), spacing: 10)
+            ], spacing: 10) {
+                providerField("OpenAI-compatible Base URL", text: $vlmacBaseURLDraft)
+                providerField("MODEL_NAME", text: $vlmacModelDraft)
+                providerSecureField("API Key", text: $vlmacKeyDraft)
+            }
+
+            HStack(spacing: 8) {
+                commandButton("Save VLM API", icon: "square.and.arrow.down", tone: .primary) {
+                    await saveVlmacConfig()
+                }
+                Text("Use the /v1 base URL. Restart applies changes to a running vlmac service.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            .disabled(store.isBusy)
+        }
+    }
+
     private var aiManusRuntimeConsole: some View {
-        HUDSection("OpenAI Compatible API · ai-manus Agent", systemImage: "cpu") {
+        HUDSection("ai-manus Runtime", systemImage: "cpu") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     if let aiManusService {
@@ -361,9 +360,9 @@ struct SettingsView: View {
                     providerField("Frontend URL", text: $aiManusFrontendURLDraft)
                     providerField("AUTH_PROVIDER", text: $aiManusAuthProviderDraft)
                     providerField("Timeout seconds", text: $aiManusTimeoutDraft)
-                    providerField("OpenAI Compatible Base URL", text: $aiManusAPIBaseDraft)
-                    providerField("Agent Model", text: $aiManusModelDraft)
-                    providerSecureField("Agent API Key", text: $aiManusKeyDraft)
+                    providerField("API_BASE", text: $aiManusAPIBaseDraft)
+                    providerField("MODEL_NAME", text: $aiManusModelDraft)
+                    providerSecureField("API_KEY", text: $aiManusKeyDraft)
                     providerField("TEMPERATURE", text: $aiManusTemperatureDraft)
                     providerField("MAX_TOKENS", text: $aiManusMaxTokensDraft)
                 }
@@ -435,70 +434,8 @@ struct SettingsView: View {
         }
     }
 
-    private var projectCortexSkillConsole: some View {
-        HUDSection("OpenAI Compatible API · Skill Generator", systemImage: "wand.and.stars") {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    if let projectCortexService {
-                        ServiceLight(
-                            service: projectCortexService,
-                            title: "Project_Cortex",
-                            detail: store.serviceDetail(projectCortexService.detail, status: projectCortexService.status)
-                        )
-                    } else {
-                        Text(store.text(.notReported))
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    Spacer(minLength: 0)
-
-                    statusBadge(
-                        store.projectCortexConfig.openaiApiKeyConfigured == true ? "available" : "stopped",
-                        title: store.projectCortexConfig.openaiApiKeyConfigured == true ? "skill key set" : "skill key optional"
-                    )
-                    if store.projectCortexConfig.useReal == true {
-                        statusBadge("available", title: "Project_Cortex service")
-                    }
-                }
-
-                Divider()
-
-                Toggle("Use Project_Cortex service instead of direct OpenAI-compatible fallback", isOn: $projectCortexUseRealDraft)
-                    .toggleStyle(.switch)
-
-                LazyVGrid(columns: [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10)
-                ], spacing: 10) {
-                    providerField("Project_Cortex Service URL", text: $projectCortexServiceBaseURLDraft)
-                    providerField("OpenAI Compatible Base URL", text: $projectCortexOpenAIBaseURLDraft)
-                    providerField("Skill Model", text: $projectCortexModelDraft)
-                    providerSecureField("Skill API Key", text: $projectCortexKeyDraft)
-                    providerField("Temperature", text: $projectCortexTemperatureDraft)
-                    providerField("Max Tokens", text: $projectCortexMaxTokensDraft)
-                    providerField("Timeout seconds", text: $projectCortexTimeoutDraft)
-                }
-
-                HStack(spacing: 8) {
-                    commandButton("Save Skill Generator", icon: "square.and.arrow.down", tone: .primary) {
-                        await saveProjectCortexConfig()
-                    }
-                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
-                        await store.refreshProviderConsoles()
-                        syncProjectCortexDrafts()
-                    }
-                    Text(projectCortexDetail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                }
-            }
-        }
-    }
-
-    private var basicMemoryEmbeddingConsole: some View {
-        HUDSection("OpenAI Compatible API · Basic Memory Embeddings", systemImage: "brain") {
+    private var basicMemoryConsole: some View {
+        HUDSection("basic-memory", systemImage: "brain.head.profile") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     if let basicMemoryService {
@@ -515,44 +452,141 @@ struct SettingsView: View {
 
                     Spacer(minLength: 0)
 
-                    statusBadge(
-                        store.basicMemoryEmbeddingConfig.semanticEmbeddingApiKeyConfigured == true ? "available" : "stopped",
-                        title: store.basicMemoryEmbeddingConfig.semanticEmbeddingApiKeyConfigured == true ? "embedding key set" : "embedding key missing"
-                    )
-                    if store.basicMemoryEmbeddingConfig.restartRequired == true {
-                        statusBadge("mock", title: "restart required")
+                    statusBadge(store.basicMemoryStatus.status, title: store.serviceStatus(store.basicMemoryStatus.status))
+                    if store.basicMemoryConfig.toolsAvailable == true {
+                        statusBadge("available", title: store.basicMemoryConfig.runtimeKind ?? "runtime")
                     }
                 }
 
                 Divider()
 
-                Toggle("Semantic search", isOn: $basicMemorySemanticEnabledDraft)
-                    .toggleStyle(.switch)
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    SignalMetric(
+                        title: "Project",
+                        value: store.basicMemoryStatus.project ?? store.basicMemoryConfig.project ?? "not configured",
+                        systemImage: "folder",
+                        color: .blue
+                    )
+                    SignalMetric(
+                        title: "Project Dir",
+                        value: store.basicMemoryStatus.projectPath ?? store.basicMemoryConfig.projectPath ?? "not setup",
+                        systemImage: "folder.badge.gearshape",
+                        color: .green
+                    )
+                    SignalMetric(
+                        title: "Config Dir",
+                        value: store.basicMemoryConfig.configPath ?? "not reported",
+                        systemImage: "gearshape",
+                        color: .orange
+                    )
+                    SignalMetric(
+                        title: "Runtime",
+                        value: basicMemoryRuntimeLabel,
+                        systemImage: "terminal",
+                        color: .purple
+                    )
+                    SignalMetric(
+                        title: "Sync",
+                        value: store.basicMemoryStatus.syncStatus ?? store.basicMemoryLastSync?.status ?? "unknown",
+                        systemImage: "arrow.triangle.2.circlepath",
+                        color: .blue
+                    )
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Setup", icon: "wrench.and.screwdriver", tone: .primary) {
+                        await store.setupBasicMemory()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshBasicMemory()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+
+                    commandButton("Recent", icon: "clock", tone: .quiet) {
+                        await store.loadBasicMemoryRecent()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+                }
+
+                HStack(alignment: .bottom, spacing: 8) {
+                    providerField("Search notes", text: $basicMemorySearchDraft)
+                    commandButton("Search", icon: "magnifyingglass", tone: .primary) {
+                        await store.searchBasicMemory(basicMemorySearchDraft)
+                    }
+                    .frame(width: 130)
+                    .disabled(store.isRunningBasicMemoryCommand || basicMemorySearchDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Sync Session", icon: "rectangle.stack.badge.plus", tone: .quiet) {
+                        await store.syncCurrentSessionToBasicMemory()
+                    }
+                    commandButton("Sync Task", icon: "checklist", tone: .quiet) {
+                        await store.syncCurrentTaskToBasicMemory()
+                    }
+                    commandButton("Sync Skill", icon: "sparkles", tone: .quiet) {
+                        await store.syncLatestSkillToBasicMemory()
+                    }
+                }
+                .disabled(store.isRunningBasicMemoryCommand)
+
+                if let detail = basicMemorySyncDetail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
 
                 LazyVGrid(columns: [
                     GridItem(.flexible(), spacing: 10),
                     GridItem(.flexible(), spacing: 10)
                 ], spacing: 10) {
-                    providerField("Provider (fastembed/openai-compatible)", text: $basicMemoryProviderDraft)
-                    providerField("Embedding Model", text: $basicMemoryModelDraft)
-                    providerField("Embedding Base URL", text: $basicMemoryBaseURLDraft)
-                    providerSecureField("Embedding API Key", text: $basicMemoryKeyDraft)
-                    providerField("API Key Env", text: $basicMemoryKeyEnvDraft)
-                    providerField("Dimensions", text: $basicMemoryDimensionsDraft)
-                    providerField("Batch Size", text: $basicMemoryBatchSizeDraft)
-                    providerField("Request Concurrency", text: $basicMemoryConcurrencyDraft)
-                    providerField("Timeout seconds", text: $basicMemoryTimeoutDraft)
+                    basicMemoryList(title: "Search", results: store.basicMemorySearch.results)
+                    basicMemoryRecentList
                 }
 
-                HStack(spacing: 8) {
-                    commandButton("Save Basic Memory", icon: "square.and.arrow.down", tone: .primary) {
-                        await saveBasicMemoryConfig()
+                if let note = store.basicMemoryNotePreview {
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.text.magnifyingglass")
+                                .foregroundStyle(.secondary)
+                            Text(note.title ?? note.path ?? "Note preview")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .lineLimit(1)
+                            Spacer(minLength: 0)
+                            if let path = note.path {
+                                Text(path)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        Text(note.content ?? note.summary ?? "No preview content.")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(10)
+                            .textSelection(.enabled)
                     }
-                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
-                        await store.refreshProviderConsoles()
-                        syncBasicMemoryDrafts()
-                    }
-                    Text(basicMemoryDetail)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                }
+
+                if let detail = store.basicMemoryStatus.detail ?? store.basicMemoryConfig.detail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+
+                if let runtimeDetail = basicMemoryRuntimeDetail {
+                    Text(runtimeDetail)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -561,8 +595,85 @@ struct SettingsView: View {
         }
     }
 
-    private var vlmacRuntimeConsole: some View {
-        HUDSection("OpenAI Compatible API · vlmac VLM", systemImage: "eye") {
+    private var contextMemoryConsole: some View {
+        HUDSection("Context Memory", systemImage: "text.bubble") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let service = voiceProducerService {
+                        ServiceLight(
+                            service: service,
+                            title: "voice producer",
+                            detail: store.serviceDetail(service.detail, status: service.status)
+                        )
+                    } else {
+                        ServiceLight(
+                            service: ServiceStatus(id: "voice-context", name: "voice producer", status: "idle", detail: "No voice context producer reported"),
+                            title: "voice producer",
+                            detail: "No voice context producer reported"
+                        )
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(voiceProducerService?.status ?? "idle", title: voiceProducerService.map { store.serviceStatus($0.status) })
+                }
+
+                Divider()
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    SignalMetric(
+                        title: "Latest",
+                        value: formattedContextTimestamp(latestContextFragment?.endedAt ?? latestContextFragment?.startedAt),
+                        systemImage: "clock",
+                        color: .cyan
+                    )
+                    SignalMetric(
+                        title: "Pending",
+                        value: "\(pendingContextCount)",
+                        systemImage: "tray",
+                        color: .orange
+                    )
+                    SignalMetric(
+                        title: "Synced",
+                        value: "\(syncedContextCount)",
+                        systemImage: "checkmark.icloud",
+                        color: .green
+                    )
+                }
+
+                HStack(spacing: 8) {
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshContextFragments()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand)
+
+                    commandButton("Sync Recent", icon: "arrow.triangle.2.circlepath", tone: .primary) {
+                        await store.syncLatestContextFragmentToBasicMemory()
+                    }
+                    .disabled(store.isRunningBasicMemoryCommand || latestContextFragment == nil)
+
+                    Text(contextMemoryDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+
+                if let detail = contextMemorySyncDetail {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    private var vlmacConsole: some View {
+        HUDSection("vlmac", systemImage: "eye.fill") {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     if let vlmacService {
@@ -579,39 +690,60 @@ struct SettingsView: View {
 
                     Spacer(minLength: 0)
 
-                    statusBadge(
-                        store.vlmacConfig.vllmApiKeyConfigured == true ? "available" : "stopped",
-                        title: store.vlmacConfig.vllmApiKeyConfigured == true ? "VLM key set" : "VLM key optional"
-                    )
-                    if store.vlmacConfig.restartRequired == true {
-                        statusBadge("mock", title: "restart vlmac")
-                    }
+                    statusBadge(vlmacService?.status ?? "unknown", title: vlmacService.map { store.serviceStatus($0.status) })
                 }
 
                 Divider()
+
+                vlmacProviderControls
 
                 LazyVGrid(columns: [
                     GridItem(.flexible(), spacing: 10),
                     GridItem(.flexible(), spacing: 10)
                 ], spacing: 10) {
-                    providerField("vlmac Service URL", text: $vlmacServiceBaseURLDraft)
-                    providerField("OpenAI Compatible Base URL", text: $vlmacVLLMBaseURLDraft)
-                    providerField("Vision Model", text: $vlmacModelDraft)
-                    providerSecureField("Vision API Key", text: $vlmacKeyDraft)
-                    providerField("Temperature", text: $vlmacTemperatureDraft)
-                    providerField("Max Tokens", text: $vlmacMaxTokensDraft)
-                    providerField("Timeout seconds", text: $vlmacTimeoutDraft)
+                    SignalMetric(
+                        title: "Storage",
+                        value: vlmacStorageDetail,
+                        systemImage: "externaldrive",
+                        color: .green
+                    )
+                    SignalMetric(
+                        title: "VLM API",
+                        value: vlmacVLMDetail,
+                        systemImage: "network",
+                        color: .purple
+                    )
+                    SignalMetric(
+                        title: "Preflight",
+                        value: store.vlmacPreflight?.compactDescription ?? "not checked",
+                        systemImage: "checkmark.seal",
+                        color: .blue
+                    )
                 }
 
                 HStack(spacing: 8) {
-                    commandButton("Save vlmac", icon: "square.and.arrow.down", tone: .primary) {
-                        await saveVlmacConfig()
+                    commandButton(store.text(.start), icon: "play.fill", tone: .primary) {
+                        await store.vlmacStart()
                     }
-                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
-                        await store.refreshProviderConsoles()
-                        syncVlmacDrafts()
+                    commandButton(store.text(.restart), icon: "arrow.clockwise", tone: .amber) {
+                        await store.vlmacRestart()
                     }
-                    Text(vlmacRuntimeDetail)
+                    commandButton(store.text(.stop), icon: "stop.fill", tone: .destructive) {
+                        await store.vlmacStop()
+                    }
+                    commandButton("Preflight", icon: "checkmark.seal", tone: .quiet) {
+                        await store.refreshVlmacPreflight(network: true)
+                    }
+                    Link(destination: URL(string: "http://127.0.0.1:59092")!) {
+                        Label("Open WebUI", systemImage: "safari")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .disabled(store.isBusy)
+
+                if let detail = vlmacService?.detail {
+                    Text(detail)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
@@ -656,49 +788,6 @@ struct SettingsView: View {
                     commandButton(store.text(.captureOnce), icon: "camera.viewfinder", tone: .quiet) { await store.openChronicleCaptureOnce() }
                     commandButton(store.text(.timelineTick), icon: "clock.arrow.circlepath", tone: .quiet) { await store.openChronicleTimelineTick() }
                     commandButton(store.text(.rebuildCapturesIndex), icon: "arrow.triangle.2.circlepath", tone: .amber) { await store.openChronicleRebuildCapturesIndex() }
-                }
-
-                Divider()
-
-                HStack(spacing: 8) {
-                    Text("OpenAI Compatible API · OpenChronicle Writer")
-                        .font(.caption)
-                        .fontWeight(.medium)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    statusBadge(
-                        store.openChronicleModelConfig.apiKeyConfigured == true ? "available" : "stopped",
-                        title: store.openChronicleModelConfig.apiKeyConfigured == true ? "key set" : "key missing"
-                    )
-                    if store.openChronicleModelConfig.restartRequired == true {
-                        statusBadge("mock", title: "restart OpenChronicle")
-                    }
-                }
-
-                LazyVGrid(columns: [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10)
-                ], spacing: 10) {
-                    providerField("Stage (default/timeline/reducer/classifier/compact)", text: $openChronicleStageDraft)
-                    providerField("Model", text: $openChronicleModelDraft)
-                    providerField("Base URL", text: $openChronicleBaseURLDraft)
-                    providerField("API Key Env", text: $openChronicleKeyEnvDraft)
-                    providerSecureField("API Key", text: $openChronicleKeyDraft)
-                    providerField("Max Tokens", text: $openChronicleMaxTokensDraft)
-                }
-
-                HStack(spacing: 8) {
-                    commandButton("Save OpenChronicle Model", icon: "square.and.arrow.down", tone: .primary) {
-                        await saveOpenChronicleConfig()
-                    }
-                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
-                        await store.refreshProviderConsoles()
-                        syncOpenChronicleDrafts()
-                    }
-                    Text(openChronicleModelDetail)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
                 }
             }
         }
@@ -776,24 +865,30 @@ struct SettingsView: View {
         store.snapshot.services.first { $0.name.lowercased() == "cua-driver" }
     }
 
+    private var ownscribeService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "ownscribe" }
+    }
+
     private var vlmacService: ServiceStatus? {
         store.snapshot.services.first { $0.name.lowercased() == "vlmac" }
+    }
+
+    private var aiManusService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "ai-manus" }
     }
 
     private var basicMemoryService: ServiceStatus? {
         store.snapshot.services.first { $0.name.lowercased() == "basic-memory" }
     }
 
-    private var projectCortexService: ServiceStatus? {
-        store.snapshot.services.first { $0.name.lowercased() == "project_cortex" || $0.name.lowercased() == "project-cortex" }
-    }
-
-    private var ownscribeService: ServiceStatus? {
-        store.snapshot.services.first { $0.name.lowercased() == "ownscribe" }
-    }
-
-    private var aiManusService: ServiceStatus? {
-        store.snapshot.services.first { $0.name.lowercased() == "ai-manus" }
+    private var voiceProducerService: ServiceStatus? {
+        store.snapshot.services.first { service in
+            let name = service.name.lowercased()
+            return name == "ownscribe_context_worker"
+                || name == "ownscribe-context-worker"
+                || name == "voice-context"
+                || name == "voice context"
+        } ?? ownscribeService
     }
 
     private var aiManusRuntimeDetail: String {
@@ -818,29 +913,95 @@ struct SettingsView: View {
         return Array(lines.suffix(6))
     }
 
-    private var openChronicleModelDetail: String {
-        let path = store.openChronicleModelConfig.configPath ?? "~/.openchronicle/config.toml"
-        let source = store.openChronicleModelConfig.configExists == true ? "config" : "will create config"
-        return "\(path) · \(source)"
+    private var basicMemorySyncDetail: String? {
+        guard let sync = store.basicMemoryLastSync else { return nil }
+        let status = sync.status ?? (sync.ok == true ? "synced" : "unknown")
+        let path = sync.path ?? sync.note?.path ?? sync.permalink ?? sync.note?.permalink
+        if let path {
+            return "\(status) · \(path)"
+        }
+        return sync.detail ?? status
     }
 
-    private var vlmacRuntimeDetail: String {
-        let env = store.vlmacConfig.envPath ?? "vlmac/.env"
-        let restart = store.vlmacConfig.restartRequired == true ? " · restart vlmac to apply" : ""
-        return "\(env)\(restart)"
+    private var vlmacStorageDetail: String {
+        if let detail = vlmacService?.detail, let range = detail.range(of: "storage=") {
+            return String(detail[range.upperBound...]).trimmingCharacters(in: .whitespaces)
+        }
+        return store.basicMemoryStatus.projectPath ?? store.basicMemoryConfig.projectPath ?? "not configured"
     }
 
-    private var basicMemoryDetail: String {
-        let path = store.basicMemoryEmbeddingConfig.configPath ?? "orchestrator/data/basic_memory/config/config.json"
-        let project = store.basicMemoryEmbeddingConfig.projectPath ?? "hippo"
-        let restart = store.basicMemoryEmbeddingConfig.restartRequired == true ? " · rebuild/restart Basic Memory to apply" : ""
-        return "\(path) · \(project)\(restart)"
+    private var vlmacVLMDetail: String {
+        store.vlmacConfig.vlmBaseUrl ?? "not configured"
     }
 
-    private var projectCortexDetail: String {
-        let path = store.projectCortexConfig.configPath ?? "orchestrator/data/project_cortex_config.json"
-        let mode = store.projectCortexConfig.useReal == true ? "Project_Cortex service" : "direct OpenAI-compatible fallback"
-        return "\(path) · \(mode)"
+    private var basicMemoryRuntimeLabel: String {
+        store.basicMemoryConfig.runtimeKind ?? store.basicMemoryConfig.status ?? "missing"
+    }
+
+    private var basicMemoryRuntimeDetail: String? {
+        let path = store.basicMemoryConfig.runtimePath
+            ?? store.basicMemoryConfig.bundledRuntimePath
+            ?? store.basicMemoryConfig.devRuntimePath
+        guard let path else { return nil }
+        if let command = store.basicMemoryConfig.commandDescription {
+            return "\(path) · \(command)"
+        }
+        return path
+    }
+
+    private var basicMemoryRecentList: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Recent")
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundStyle(.secondary)
+
+            if store.basicMemoryRecent.resolvedNotes.isEmpty {
+                basicMemoryEmptyRow("No recent notes.")
+            } else {
+                ForEach(store.basicMemoryRecent.resolvedNotes) { note in
+                    Button {
+                        Task { await store.loadBasicMemoryNotePreview(note) }
+                    } label: {
+                        basicMemoryNoteLabel(
+                            title: note.title ?? note.path ?? "Untitled note",
+                            subtitle: note.updatedAt ?? note.createdAt ?? note.summary ?? ""
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var latestContextFragment: ContextFragment? {
+        store.contextFragments.first
+    }
+
+    private var pendingContextCount: Int {
+        store.contextFragments.filter { $0.syncedAt == nil }.count
+    }
+
+    private var syncedContextCount: Int {
+        store.contextFragments.filter { $0.syncedAt != nil }.count
+    }
+
+    private var contextMemoryDetail: String {
+        guard let fragment = latestContextFragment else {
+            return "No recent voice context."
+        }
+        let source = fragment.source ?? "voice"
+        let confidence = fragment.confidence.map { " · \(Int($0 * 100))%" } ?? ""
+        return "\(source)\(confidence) · \(fragment.syncedAt == nil ? "pending" : "synced")"
+    }
+
+    private var contextMemorySyncDetail: String? {
+        guard let sync = store.basicMemoryLastSync, sync.fragmentId != nil else { return nil }
+        let status = sync.status ?? (sync.ok == true ? "synced" : "unknown")
+        if let path = sync.path ?? sync.note?.path ?? sync.permalink ?? sync.note?.permalink {
+            return "\(status) · \(path)"
+        }
+        return sync.detail ?? status
     }
 
     private func audioSourceLabel(_ source: OwnscribeAudioSource) -> String {
@@ -873,6 +1034,71 @@ struct SettingsView: View {
         }
         .padding(8)
         .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func basicMemoryList(title: String, results: [BasicMemorySearchResult]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .fontWeight(.medium)
+                .foregroundStyle(.secondary)
+
+            if results.isEmpty {
+                basicMemoryEmptyRow("No search results.")
+            } else {
+                ForEach(results) { result in
+                    Button {
+                        Task { await store.loadBasicMemoryNotePreview(result) }
+                    } label: {
+                        basicMemoryNoteLabel(
+                            title: result.title ?? result.path ?? "Untitled result",
+                            subtitle: result.snippet ?? result.type ?? result.permalink ?? ""
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func basicMemoryNoteLabel(title: String, subtitle: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "doc.text")
+                .foregroundStyle(.secondary)
+                .frame(width: 16)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(.medium)
+                    .lineLimit(1)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func basicMemoryEmptyRow(_ title: String) -> some View {
+        Text(title)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.thinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+
+    private func formattedContextTimestamp(_ value: String?) -> String {
+        guard let value, let date = ISO8601DateFormatter().date(from: value) else {
+            return store.text(.notReported)
+        }
+        return date.formatted(date: .omitted, time: .shortened)
     }
 
     private func providerField(_ title: String, text: Binding<String>) -> some View {
@@ -920,6 +1146,21 @@ struct SettingsView: View {
         summaryModelDraft = store.ownscribeConfig.summaryModel ?? ""
     }
 
+    private func saveVlmacConfig() async {
+        await store.updateVlmacConfig(
+            vlmBaseUrl: nonEmpty(vlmacBaseURLDraft),
+            vlmModel: nonEmpty(vlmacModelDraft),
+            vlmApiKey: nonEmpty(vlmacKeyDraft)
+        )
+        vlmacKeyDraft = ""
+        syncVlmacDrafts()
+    }
+
+    private func syncVlmacDrafts() {
+        vlmacBaseURLDraft = store.vlmacConfig.vlmBaseUrl ?? ""
+        vlmacModelDraft = store.vlmacConfig.vlmModel ?? ""
+    }
+
     private func saveAiManusConfig() async {
         await store.updateAiManusConfig(
             baseUrl: nonEmpty(aiManusBaseURLDraft),
@@ -935,104 +1176,6 @@ struct SettingsView: View {
         )
         aiManusKeyDraft = ""
         syncAiManusDrafts()
-    }
-
-    private func saveOpenChronicleConfig() async {
-        await store.updateOpenChronicleModelConfig(
-            stage: nonEmpty(openChronicleStageDraft),
-            model: nonEmpty(openChronicleModelDraft),
-            baseUrl: nonEmpty(openChronicleBaseURLDraft),
-            apiKeyEnv: nonEmpty(openChronicleKeyEnvDraft),
-            apiKey: nonEmpty(openChronicleKeyDraft),
-            maxTokens: intValue(openChronicleMaxTokensDraft)
-        )
-        openChronicleKeyDraft = ""
-        syncOpenChronicleDrafts()
-    }
-
-    private func syncOpenChronicleDrafts() {
-        openChronicleStageDraft = store.openChronicleModelConfig.stage ?? "default"
-        openChronicleModelDraft = store.openChronicleModelConfig.model ?? ""
-        openChronicleBaseURLDraft = store.openChronicleModelConfig.baseUrl ?? ""
-        openChronicleKeyEnvDraft = store.openChronicleModelConfig.apiKeyEnv ?? "OPENAI_API_KEY"
-        openChronicleMaxTokensDraft = store.openChronicleModelConfig.maxTokens.map(String.init) ?? ""
-    }
-
-    private func saveVlmacConfig() async {
-        await store.updateVlmacConfig(
-            serviceBaseUrl: nonEmpty(vlmacServiceBaseURLDraft),
-            vllmBaseUrl: nonEmpty(vlmacVLLMBaseURLDraft),
-            vllmModel: nonEmpty(vlmacModelDraft),
-            vllmApiKey: nonEmpty(vlmacKeyDraft),
-            temperature: doubleValue(vlmacTemperatureDraft),
-            maxTokens: intValue(vlmacMaxTokensDraft),
-            timeoutSeconds: doubleValue(vlmacTimeoutDraft)
-        )
-        vlmacKeyDraft = ""
-        syncVlmacDrafts()
-    }
-
-    private func syncVlmacDrafts() {
-        vlmacServiceBaseURLDraft = store.vlmacConfig.serviceBaseUrl ?? ""
-        vlmacVLLMBaseURLDraft = store.vlmacConfig.vllmBaseUrl ?? ""
-        vlmacModelDraft = store.vlmacConfig.vllmModel ?? ""
-        vlmacTemperatureDraft = store.vlmacConfig.temperature.map { formatNumber($0) } ?? ""
-        vlmacMaxTokensDraft = store.vlmacConfig.maxTokens.map(String.init) ?? ""
-        vlmacTimeoutDraft = store.vlmacConfig.timeoutSeconds.map { formatNumber($0) } ?? ""
-    }
-
-    private func saveBasicMemoryConfig() async {
-        await store.updateBasicMemoryEmbeddingConfig(
-            semanticSearchEnabled: basicMemorySemanticEnabledDraft,
-            semanticEmbeddingProvider: nonEmpty(basicMemoryProviderDraft),
-            semanticEmbeddingModel: nonEmpty(basicMemoryModelDraft),
-            semanticEmbeddingBaseUrl: nonEmpty(basicMemoryBaseURLDraft),
-            semanticEmbeddingApiKey: nonEmpty(basicMemoryKeyDraft),
-            semanticEmbeddingApiKeyEnv: nonEmpty(basicMemoryKeyEnvDraft),
-            semanticEmbeddingDimensions: intValue(basicMemoryDimensionsDraft),
-            semanticEmbeddingBatchSize: intValue(basicMemoryBatchSizeDraft),
-            semanticEmbeddingRequestConcurrency: intValue(basicMemoryConcurrencyDraft),
-            semanticEmbeddingTimeout: doubleValue(basicMemoryTimeoutDraft)
-        )
-        basicMemoryKeyDraft = ""
-        syncBasicMemoryDrafts()
-    }
-
-    private func syncBasicMemoryDrafts() {
-        basicMemorySemanticEnabledDraft = store.basicMemoryEmbeddingConfig.semanticSearchEnabled ?? true
-        basicMemoryProviderDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingProvider ?? ""
-        basicMemoryModelDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingModel ?? ""
-        basicMemoryBaseURLDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingBaseUrl ?? ""
-        basicMemoryKeyEnvDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingApiKeyEnv ?? "OPENAI_API_KEY"
-        basicMemoryDimensionsDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingDimensions.map(String.init) ?? ""
-        basicMemoryBatchSizeDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingBatchSize.map(String.init) ?? ""
-        basicMemoryConcurrencyDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingRequestConcurrency.map(String.init) ?? ""
-        basicMemoryTimeoutDraft = store.basicMemoryEmbeddingConfig.semanticEmbeddingTimeout.map { formatNumber($0) } ?? ""
-    }
-
-    private func saveProjectCortexConfig() async {
-        await store.updateProjectCortexConfig(
-            useReal: projectCortexUseRealDraft,
-            serviceBaseUrl: nonEmpty(projectCortexServiceBaseURLDraft),
-            openaiBaseUrl: nonEmpty(projectCortexOpenAIBaseURLDraft),
-            openaiModel: nonEmpty(projectCortexModelDraft),
-            openaiApiKey: nonEmpty(projectCortexKeyDraft),
-            temperature: doubleValue(projectCortexTemperatureDraft),
-            maxTokens: intValue(projectCortexMaxTokensDraft),
-            timeoutSeconds: doubleValue(projectCortexTimeoutDraft)
-        )
-        projectCortexKeyDraft = ""
-        syncProjectCortexDrafts()
-    }
-
-    private func syncProjectCortexDrafts() {
-        projectCortexUseRealDraft = store.projectCortexConfig.useReal ?? false
-        projectCortexServiceBaseURLDraft = store.projectCortexConfig.serviceBaseUrl ?? ""
-        projectCortexOpenAIBaseURLDraft = store.projectCortexConfig.openaiBaseUrl ?? ""
-        projectCortexModelDraft = store.projectCortexConfig.openaiModel ?? ""
-        projectCortexTemperatureDraft = store.projectCortexConfig.temperature.map { formatNumber($0) } ?? ""
-        projectCortexMaxTokensDraft = store.projectCortexConfig.maxTokens.map(String.init) ?? ""
-        projectCortexTimeoutDraft = store.projectCortexConfig.timeoutSeconds.map { formatNumber($0) } ?? ""
     }
 
     private func syncAiManusDrafts() {

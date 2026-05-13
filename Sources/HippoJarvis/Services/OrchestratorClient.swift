@@ -62,10 +62,6 @@ struct OrchestratorClient {
         try await getSnapshot(path: "state")
     }
 
-    func plan() async throws -> PlanStatus {
-        try await get(path: "plan")
-    }
-
     func eventHistory(limit: Int = 50) async throws -> [EventRecord] {
         var components = URLComponents(url: baseURL.appending(path: "events/history"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
@@ -99,22 +95,6 @@ struct OrchestratorClient {
 
     func captureFinish() async throws -> AppSnapshot {
         try await postSnapshot(path: "sop/capture-finish")
-    }
-
-    func highlight() async throws -> AppSnapshot {
-        try await postSnapshot(path: "highlight")
-    }
-
-    func frontmost() async throws -> ForegroundAXSnapshot {
-        try await get(path: "frontmost")
-    }
-
-    func followUp() async throws -> FollowUpPackage {
-        try await postWrapped(path: "follow-up")
-    }
-
-    func mailDraft() async throws -> MailDraftInsertResult {
-        try await postWrapped(path: "mail-draft")
     }
 
     func generateActiveTask() async throws -> AppSnapshot {
@@ -169,48 +149,37 @@ struct OrchestratorClient {
         try await postSnapshot(path: "integrations/openchronicle/timeline-tick")
     }
 
-    func openChronicleModelConfig() async throws -> OpenChronicleModelConfig {
-        try await get(path: "integrations/openchronicle/model-config")
-    }
-
-    func updateOpenChronicleModelConfig(_ request: OpenChronicleModelConfigUpdateRequest) async throws -> OpenChronicleModelConfig {
-        try await post(path: "integrations/openchronicle/model-config", body: request)
+    func vlmacStatus() async throws -> ServiceStatus {
+        try await get(path: "integrations/vlmac/status")
     }
 
     func vlmacConfig() async throws -> VlmacConfig {
         try await get(path: "integrations/vlmac/config")
     }
 
-    func vlmacStatus() async throws -> ServiceStatus {
-        try await get(path: "integrations/vlmac/status")
-    }
-
-    func updateVlmacConfig(_ request: VlmacConfigUpdateRequest) async throws -> VlmacConfig {
+    func updateVlmacConfig(_ request: VlmacConfigRequest) async throws -> VlmacConfig {
         try await post(path: "integrations/vlmac/config", body: request)
     }
 
-    func basicMemoryEmbeddingConfig() async throws -> BasicMemoryEmbeddingConfig {
-        try await get(path: "integrations/basic-memory/embedding-config")
+    func vlmacPreflight(network: Bool = false) async throws -> JSONValue {
+        var components = URLComponents(url: baseURL.appending(path: "integrations/vlmac/preflight"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "network", value: network ? "true" : "false")]
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("integrations/vlmac/preflight")
+        }
+        return try await get(url: url)
     }
 
-    func basicMemoryStatus() async throws -> ServiceStatus {
-        try await get(path: "integrations/basic-memory/status")
+    func vlmacStart() async throws -> AppSnapshot {
+        try await postSnapshot(path: "integrations/vlmac/start")
     }
 
-    func updateBasicMemoryEmbeddingConfig(_ request: BasicMemoryEmbeddingConfigUpdateRequest) async throws -> BasicMemoryEmbeddingConfig {
-        try await post(path: "integrations/basic-memory/embedding-config", body: request)
+    func vlmacStop() async throws -> AppSnapshot {
+        try await postSnapshot(path: "integrations/vlmac/stop")
     }
 
-    func projectCortexConfig() async throws -> ProjectCortexConfig {
-        try await get(path: "integrations/project-cortex/config")
-    }
-
-    func projectCortexStatus() async throws -> ServiceStatus {
-        try await get(path: "integrations/project-cortex/status")
-    }
-
-    func updateProjectCortexConfig(_ request: ProjectCortexConfigUpdateRequest) async throws -> ProjectCortexConfig {
-        try await post(path: "integrations/project-cortex/config", body: request)
+    func vlmacRestart() async throws -> AppSnapshot {
+        try await postSnapshot(path: "integrations/vlmac/restart")
     }
 
     func ownscribeConfig() async throws -> OwnscribeConfig {
@@ -276,8 +245,86 @@ struct OrchestratorClient {
         return try await get(url: url)
     }
 
+    func basicMemoryConfig() async throws -> BasicMemoryConfig {
+        try await getWrapped(path: "integrations/basic-memory/config")
+    }
+
+    func basicMemoryStatus() async throws -> BasicMemoryStatus {
+        try await getWrapped(path: "integrations/basic-memory/status")
+    }
+
+    func setupBasicMemory() async throws -> BasicMemoryStatus {
+        try await postWrapped(path: "integrations/basic-memory/setup")
+    }
+
+    func searchBasicMemory(query: String, limit: Int = 8) async throws -> BasicMemorySearchResponse {
+        var components = URLComponents(url: baseURL.appending(path: "integrations/basic-memory/search"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: query),
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("integrations/basic-memory/search")
+        }
+        return try await get(url: url)
+    }
+
+    func recentBasicMemoryNotes(limit: Int = 8) async throws -> BasicMemoryRecentResponse {
+        var components = URLComponents(url: baseURL.appending(path: "integrations/basic-memory/recent"), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("integrations/basic-memory/recent")
+        }
+        return try await get(url: url)
+    }
+
+    func basicMemoryNotePreview(_ request: BasicMemoryNotePreviewRequest) async throws -> BasicMemoryNote {
+        guard let identifier = request.identifier ?? request.path ?? request.permalink, !identifier.isEmpty else {
+            throw OrchestratorError.invalidURL("integrations/basic-memory/note")
+        }
+        return try await get(path: "integrations/basic-memory/note/\(identifier)")
+    }
+
+    func syncBasicMemorySession(_ sessionID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-session/\(sessionID)")
+    }
+
+    func syncBasicMemoryTask(_ taskID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-task/\(taskID)")
+    }
+
+    func syncBasicMemorySkill(_ skillID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-skill/\(skillID)")
+    }
+
+    func recentContextFragments(sessionID: String? = nil, modality: String? = "voice", limit: Int = 8) async throws -> ContextFragmentsResponse {
+        var components = URLComponents(url: baseURL.appending(path: "context/recent"), resolvingAgainstBaseURL: false)
+        var queryItems: [URLQueryItem] = [
+            URLQueryItem(name: "limit", value: "\(limit)")
+        ]
+        if let sessionID, !sessionID.isEmpty {
+            queryItems.append(URLQueryItem(name: "session_id", value: sessionID))
+        }
+        if let modality, !modality.isEmpty {
+            queryItems.append(URLQueryItem(name: "modality", value: modality))
+        }
+        components?.queryItems = queryItems
+        guard let url = components?.url else {
+            throw OrchestratorError.invalidURL("context/recent")
+        }
+        return try await getWrapped(url: url, path: "context/recent")
+    }
+
+    func syncBasicMemoryContext(fragmentID: String) async throws -> BasicMemorySyncResponse {
+        try await postWrapped(path: "integrations/basic-memory/sync-context/\(fragmentID)")
+    }
+
     func createManusSession() async throws -> ManusSessionResponse {
         try await postWrapped(path: "integrations/ai-manus/session")
+    }
+
+    func createChatSession() async throws -> ManusSessionResponse {
+        try await postWrapped(path: "chat/session")
     }
 
     func manusSessions() async throws -> ManusThreadsResponse {
@@ -323,6 +370,31 @@ struct OrchestratorClient {
             attachments: attachments
         )
         let url = baseURL.appending(path: "integrations/ai-manus/session/\(sessionID)/chat")
+        try await streamChatRequest(url: url, requestBody: requestBody, onEvent: onEvent)
+    }
+
+    func streamChatMessage(
+        sessionID: String,
+        message: String,
+        attachments: [JSONValue]? = nil,
+        eventID: String? = nil,
+        onEvent: @escaping @Sendable (ManusStreamEvent) async -> Void
+    ) async throws {
+        let requestBody = ManusChatRequest(
+            message: message,
+            timestamp: Int(Date().timeIntervalSince1970),
+            eventId: eventID,
+            attachments: attachments
+        )
+        let url = baseURL.appending(path: "chat/session/\(sessionID)/message")
+        try await streamChatRequest(url: url, requestBody: requestBody, onEvent: onEvent)
+    }
+
+    private func streamChatRequest(
+        url: URL,
+        requestBody: ManusChatRequest,
+        onEvent: @escaping @Sendable (ManusStreamEvent) async -> Void
+    ) async throws {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 1_800
@@ -416,7 +488,10 @@ struct OrchestratorClient {
     }
 
     private func getWrapped<T: Decodable>(path: String) async throws -> T {
-        let url = baseURL.appending(path: path)
+        try await getWrapped(url: baseURL.appending(path: path), path: path)
+    }
+
+    private func getWrapped<T: Decodable>(url: URL, path: String) async throws -> T {
         let (data, response) = try await URLSession.shared.data(from: url)
         try validate(response, data: data)
         return try decodeWrapped(T.self, from: data, path: path)

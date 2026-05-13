@@ -1,631 +1,1169 @@
 # HippoDEMO · Design Specification
 
-> Single-source implementation spec for the macOS 26 (Tahoe / Liquid Glass) build of HippoDEMO.
+> Single-source implementation spec for the **macOS 26 (Tahoe / Liquid Glass)** build of HippoDEMO.
 > Pair this document with `Hippo Demo.html` — the HTML mocks are the visual ground truth; this
-> document tells a coding agent how to translate them into native code.
+> document tells a coding agent how to translate them into native code **without recreating the
+> browser chrome the mock fakes**.
 
 Last updated: 2026-05-13. Target OS: macOS 26 (Tahoe). Language: Swift 6 / SwiftUI 6 + AppKit
-where SwiftUI lacks surface area. The product behavior is fixed by `HIPPODEMO_PRD_REALTIME_PATH.md`;
+where SwiftUI lacks surface area. Product behavior is fixed by `HIPPODEMO_PRD_REALTIME_PATH.md`;
 this document only defines the **interface**.
+
+---
+
+## 0. Critical pitfalls — read this first
+
+These are the ten mistakes that produce the bugs / misalignment / aesthetic drift previous attempts
+hit. Each is restated in its section but stated together here so the agent has a checklist before
+writing code.
+
+| # | Pitfall | Right answer |
+| --- | --- | --- |
+| 1 | Drawing fake traffic lights inside the sidebar (because the mock does) | Use the system window chrome. macOS draws real traffic lights in the window titlebar. Do **not** reimplement them. |
+| 2 | Using `.toolbar { … }` for the 44-pt filter row at the top of each page | The 44-pt filter row is **content**, not chrome. Build it as a manual `HStack(spacing: 8)` inside the detail view. Use `.toolbar { … }` only for window-level items (title, right-side actions). |
+| 3 | Using the system's automatic sidebar toggle *and* a custom one | Hide the system one (`.toolbar(removing: .sidebarToggle)`) **and** add your own custom toggle via `ToolbarItem(.navigation)`. Otherwise users see two toggles. |
+| 4 | Letting `Toggle().toggleStyle(.switch)` render at its default macOS size (50 × 31 pt) | Wrap with `.controlSize(.mini)` or build a custom 36 × 22 capsule toggle. The mock's switch is 36 × 22. |
+| 5 | Slapping `.regularMaterial` on every panel and hoping it matches the mock | macOS 26 Liquid Glass uses `.glassEffect()` and `.containerBackground(.thickMaterial, …)`. See §3.3 — use the table, don't improvise. |
+| 6 | Replacing the PUA glyphs in the HTML with whatever SF Symbols name "looks similar" | Use the explicit name table in §11. Every glyph in the mock has a named SF Symbol; do not pattern-match. |
+| 7 | Using `Divider()` between cells in a horizontal metadata strip | `Divider()` is horizontal in SwiftUI. For a vertical hairline use `Rectangle().frame(width: 0.5).foregroundStyle(.separator)`. |
+| 8 | Stacking `.frame(height: 32)` with `.padding(.vertical, …)` and getting a 40-pt row | Heights in this spec are *outer* heights. Use either `.frame(height: H)` **or** padding, not both. Each row's spec lists which. |
+| 9 | Picker with `.pickerStyle(.segmented)` for the in-pane filter row | The mock's segmented control is **not** the system one. It's a capsule pill: `RoundedRectangle(7)` + 2-pt inner padding + per-cell `RoundedRectangle(5)`. Build it custom — see §6.2. |
+| 10 | Rendering the Skill markdown with `AttributedString(markdown:)` | `AttributedString(markdown:)` cannot render the amber callout box or the monospace `<pre>` block. Use `swift-markdown-ui` or hand-roll renderer — see §5.7. |
 
 ---
 
 ## 1. Product surface
 
-HippoDEMO is a status-bar-resident macOS app with four user-facing surfaces, all of which share a
-single backend (`http://127.0.0.1:8787` FastAPI Orchestrator):
+HippoDEMO is a status-bar-resident macOS app with two windows + two popover states, all sharing a
+single local backend (`http://127.0.0.1:8787` FastAPI Orchestrator):
 
-| Surface | Purpose | Primary control |
+| Surface | Purpose | Hosting |
 | --- | --- | --- |
 | **Menu Bar extra** | At-a-glance presence + entry point | `MenuBarExtra` |
-| **Status Popover** | Live session control, services, recent task | `MenuBarExtra(... .window)` |
-| **Review Popover** | Same window — content changes when an Active Task is awaiting review | same `MenuBarExtra` window |
-| **Dashboard window** | Full session, library, sessions, settings | Standard `Window` w/ `NavigationSplitView` |
+| **Status popover** | Live session control, services | `MenuBarExtra(... .window)` body when no task awaits |
+| **Review popover** | Awaiting-review task review | Same `MenuBarExtra` body when `task.state == .awaitingReview` |
+| **Dashboard window** | Chat, Live Signal, Active Task, Sessions, Skill Library, Settings | `Window` with `NavigationSplitView` |
 
-Behavior is exhaustively specified in the PRD (`HIPPODEMO_PRD_REALTIME_PATH.md`). This file only
-defines visual structure, materials, type, and the SwiftUI hierarchy.
+Behavior is fully specified in the PRD; this file only defines the **interface**.
 
 ---
 
-## 2. Project layout (recommended)
+## 2. Project layout
 
 ```
-HippoJarvis.app/
+HippoJarvis/
 ├── App/
-│   ├── HippoJarvisApp.swift            // @main, MenuBarExtra + WindowGroup
-│   ├── AppState.swift                  // ObservableObject — /state SSE bridge
+│   ├── HippoJarvisApp.swift            // @main — MenuBarExtra + Window
+│   ├── AppState.swift                  // ObservableObject — /state + SSE bridge
 │   └── OrchestratorClient.swift        // URLSession SSE + REST
 ├── DesignSystem/
-│   ├── Tokens.swift                    // Colors, Fonts, Materials, Radii
-│   ├── Materials.swift                 // .regularMaterial wrappers
-│   ├── PushButton.swift                // bordered / preferred / destructive
-│   ├── ListRow.swift                   // 24h sidebar item, 44h form row, etc.
-│   ├── SegmentedControl.swift          // toolbar segmented
-│   └── StatusDot.swift                 // pulsing recording dot
+│   ├── Tokens.swift                    // Colors, Fonts, Spacing, Radii
+│   ├── Materials.swift                 // glass(), surfaceCard()
+│   ├── PushButton.swift                // ButtonStyle variants
+│   ├── SegmentedPill.swift             // custom segmented (not system)
+│   ├── StatusDot.swift                 // solid + pulsing
+│   ├── HippoGlyph.swift                // the one custom symbol
+│   └── Hairline.swift                  // VHairline + HHairline
 ├── MenuBar/
-│   ├── MenuBarExtraView.swift          // HippoGlyph + pulsing dot
-│   ├── StatusPopover.swift             // Idle / recording popover body
-│   └── ReviewPopover.swift             // Task-review popover body
+│   ├── MenuBarExtraView.swift          // HippoGlyph + recording dot
+│   ├── PopoverHost.swift               // routes Status vs Review
+│   ├── StatusPopover.swift
+│   └── ReviewPopover.swift
 ├── Dashboard/
-│   ├── DashboardWindow.swift           // NavigationSplitView root
-│   ├── Sidebar.swift                   // Hippo identity + Activity + Library
-│   ├── ChatView.swift                  // agent conversation surface
+│   ├── DashboardWindow.swift           // NavigationSplitView root + custom toolbar
+│   ├── Sidebar.swift                   // Hippo identity + Activity + Library + footer
+│   ├── PageShell.swift                 // (title row) + (filter row) + content
+│   ├── ChatView.swift
 │   ├── LiveSignalView.swift
 │   ├── ActiveTaskView.swift
 │   ├── SessionsView.swift
-│   ├── SkillView.swift                 // markdown viewer
+│   ├── SkillView.swift
 │   └── SettingsView.swift
 └── Resources/
-    └── Assets.xcassets/
+    └── Assets.xcassets/                // only HippoGlyph.symbolset + accent
 ```
 
-Only one `@main` (`HippoJarvisApp`); the menu-bar extra and the window-group both live inside it.
-The dashboard is a standard window so users can `⌘W` close and re-open from the popover or Dock.
+Only **one `@main`** (`HippoJarvisApp`). It declares both the `MenuBarExtra` and the dashboard
+`Window`. The dashboard is a `Window` (singleton), not a `WindowGroup`.
 
 ---
 
 ## 3. Design tokens
 
-All tokens map 1:1 with the values currently used in `hippo-shared.jsx`. They derive from the
-attached macOS 26 Figma kit — keep the exact values.
+Single source of truth. Wire these into `DesignSystem/Tokens.swift`.
 
 ### 3.1 Color
 
-| Token | sRGB | When | SwiftUI |
+| Token | sRGB (light) | sRGB (dark) | SwiftUI shortcut |
 | --- | --- | --- | --- |
-| `text.primary` | `rgba(0,0,0,0.85)` light · `rgba(255,255,255,0.92)` dark | Body, labels | `.foregroundStyle(.primary)` |
-| `text.secondary` | `rgba(0,0,0,0.5)` / `rgba(255,255,255,0.55)` | Subtitles, captions | `.secondary` |
-| `text.tertiary` | `rgb(191,191,191)` | Trailing details, hints | `.tertiary` |
-| `accent.system` | `rgb(0,122,255)` | Selected sidebar symbol, links, preferred button | `.tint(.accentColor)` / `Color.accentColor` |
-| `accent.preferredFill` | `rgb(13,111,255)` | Preferred / default push-button background | `Color(red:13/255,green:111/255,blue:255/255)` |
-| `state.green` | `rgb(48,209,88)` | Toggle on, "Granted", "Ready" pill | `Color.green` system |
-| `state.amber` | `rgb(255,159,10)` | Mock fallback, warning callout | `Color.orange` system |
-| `state.red` | `rgb(255,56,60)` | Recording, destructive, stop | `Color.red` system |
-| `sel.bg` | `rgba(0,0,0,0.11)` | Sidebar selection, table row selected | n/a — use `.contentShape(.rect)` + manual |
-| `divider` | `rgba(0,0,0,0.08–0.10)` | All hairlines | `Divider()` (override if needed) |
+| `text.primary` | `rgba(0,0,0,0.85)` | `rgba(255,255,255,0.92)` | `.foregroundStyle(.primary)` |
+| `text.secondary` | `rgba(0,0,0,0.5)` | `rgba(255,255,255,0.55)` | `.foregroundStyle(.secondary)` |
+| `text.tertiary` | `rgba(0,0,0,0.4)` | `rgba(255,255,255,0.4)` | `.foregroundStyle(.tertiary)` |
+| `accent` | system blue | system blue | `Color.accentColor` |
+| `accent.preferred-fill` | `rgb(0,122,255)` | `rgb(10,132,255)` | `Color.accentColor` |
+| `state.green` | `rgb(48,209,88)` | `rgb(48,209,88)` | `Color.green` |
+| `state.amber` | `rgb(255,159,10)` | `rgb(255,159,10)` | `Color.orange` |
+| `state.red` | `rgb(255,56,60)` | `rgb(255,69,73)` | `Color.red` |
+| `selection.bg` | `rgba(0,0,0,0.11)` | `rgba(255,255,255,0.14)` | `Color.sidebarSelected` (dynamic, §9) |
+| `divider` | `rgba(0,0,0,0.10)` | `rgba(255,255,255,0.16)` | `Color.separator` (use the system one) |
 
-> Always source the system accent via `Color.accentColor` so user preferences are respected; the
-> hard hex above is only the design intent.
+Never hard-code black on a possibly-dark surface. The `.primary` / `.secondary` / `.tertiary`
+hierarchical foreground styles handle dark mode automatically — use them for **all** text unless
+the design calls for a specific tint (e.g. red for "stop").
 
 ### 3.2 Type — SF Pro
 
-| Style | Family / weight | Size / leading / tracking |
+Every text node uses SF Pro (system default on macOS) except the Chat hero, which uses **New York**
+(macOS's bundled serif). Reference both by family name only — the system resolves weights:
+
+```swift
+// SF Pro (default)
+.font(.system(size: 13, weight: .medium))
+
+// New York (serif) — for the Chat hero ONLY
+.font(.system(size: 42, weight: .regular, design: .serif))
+```
+
+| Style | Family / weight | Size / leading / tracking | Use site |
+| --- | --- | --- | --- |
+| `display.xxl` | SF Pro Bold | 32 / 36 / -0.025em | Skill page H1 |
+| `display.xl` | SF Pro Bold | 28 / 32 / -0.020em | Active Task hero |
+| `serif.hero` | **New York** Regular | 42 / 48 / -0.020em | Chat "What should Hippo do?" *(only)* |
+| `title.h1` | SF Pro Semibold | 17 / 22 / -0.020em | Popover hero, sidebar identity |
+| `body` | SF Pro Regular | 13 / 18 / -0.008em | Body, sidebar items, table rows |
+| `body.emph` | SF Pro Medium | 13 / 16 / -0.005em | Selected sidebar item, button labels |
+| `caption` | SF Pro Regular | 11 / 14 / 0 | Subtitles, secondary detail |
+| `caption.bold` | SF Pro Semibold | 11 / 14 / 0.005em | Sidebar section header, form section header |
+| `mono.body` | SF Mono Regular | 12.5 / 18 / -0.005em | Inline code, file paths, IDs |
+| `mono.caption` | SF Mono Regular | 11 / 14 / -0.005em | Timeline timestamps, version strings |
+
+**Never** ship absolute-point text in production paths the user can scale (body and below). Wrap
+in `.dynamicTypeSize(...DynamicTypeSize.xxxLarge)` for Dynamic Type clamping if needed.
+
+### 3.3 Materials — Liquid Glass
+
+The mock layers two backgrounds and a 30-px backdrop blur to approximate macOS 26's Liquid Glass.
+**SwiftUI on macOS 26 ships the real thing — use it, don't approximate.**
+
+| Surface | macOS 26 SwiftUI | macOS 14–15 fallback |
 | --- | --- | --- |
-| `display.xxl` | SF Pro Heavy | 32 / 36 / -0.025em |
-| `display.xl` | SF Pro Bold | 28 / 32 / -0.020em |
-| `display.lg` | SF Pro Bold | 22 / 26 / -0.020em |
-| `title.h1` | SF Pro Bold | 17 / 22 / -0.020em |
-| `title.h2` | SF Pro Medium | 15 / 22 / -0.008em |
-| `body` | SF Pro Regular | 13 / 18 / -0.008em |
-| `body.emph` | SF Pro Medium | 13 / 16 / -0.005em |
-| `caption` | SF Pro Regular | 11 / 14 / 0 |
-| `caption.bold` | SF Pro Bold | 11 / 14 / 0.005em |
-| `mono.body` | SF Mono Regular | 12.5 / 18 / -0.005em |
-| `mono.caption` | SF Mono Regular | 11 / 14 / -0.005em |
+| Window content background | (no explicit fill; the window provides) | (default) |
+| Sidebar | `NavigationSplitView` auto-applies vibrant material | `.regularMaterial` |
+| Popover body | `.glassEffect()` (macOS 26) | `.regularMaterial` |
+| Sidebar/sheet card | `.thickMaterial` | `.thickMaterial` |
+| Filter row background under content title | none (transparent over window material) | none |
 
-In SwiftUI use `.font(.system(size:13, weight:.medium, design:.default))` or `.font(.body)` family
-modifiers. **Never override the user's accessibility text-size preference** — pin only the relative
-ratios.
-
-### 3.3 Materials (Liquid Glass)
-
-The mock layers two backgrounds per Apple's Liquid Glass spec. In SwiftUI prefer the system
-materials — they map 1:1:
-
-| Mock token | SwiftUI material | Where it is used |
-| --- | --- | --- |
-| `material.window` | `.regularMaterial` | Dashboard window content |
-| `material.sidebar` | `.thinMaterial` | Dashboard sidebar (`NavigationSplitView` does this automatically) |
-| `material.popover` | `.regularMaterial` | Status popover, Review popover |
-| `material.toolbar` | `.bar` / `.ultraThinMaterial` | Window titlebar / toolbar |
-| `material.menubar` | (system; not overridable) | The menu bar itself |
-
-Underlying CSS values for reference:
-- Light: fill `rgba(245,245,245,0.67)` over glass tint `rgba(0,0,0,0.2)`, blur 30, saturate 180.
-- Dark: fill `rgba(38,38,38,0.67)` over glass tint `rgba(0,0,0,0.2)`, blur 30, saturate 180.
-
-**Shadows.**
-- Popover: `0 4px 20px rgba(0,0,0,0.15), 0 0 0 0.5px rgba(0,0,0,0.10)` — SwiftUI: rely on
-  `.background(.regularMaterial, in: RoundedRectangle(...))`; system applies the shadow.
-- Window: macOS supplies it. Do not draw your own.
+**Do not** dump `.regularMaterial` on the dashboard's main content area — `NavigationSplitView`
+already provides the right material. Doubling it produces grey-on-grey.
 
 ### 3.4 Spacing & radii
 
 | Token | Value | Use |
 | --- | --- | --- |
-| `space.1 / 2 / 3 / 4` | 4 / 8 / 12 / 16 | Inter-element padding |
+| `space.0.5 / 1 / 1.5 / 2 / 3 / 4` | 2 / 4 / 6 / 8 / 12 / 16 | Inter-element padding |
 | `radius.row` | 6 | Push buttons, segmented cells |
-| `radius.item` | 8 | Sidebar items |
+| `radius.item` | 8 | Sidebar items, form rows, list rows |
 | `radius.card` | 10 | Form sections, table containers |
-| `radius.popover` | 16 | Popovers, dashboards (window radius is system-provided 16) |
-| `radius.material` | 34 | Large free-floating glass (rare here) |
+| `radius.composer` | 18 | Chat composer card |
+| `radius.popover` | 16 | Popovers |
+| `radius.window` | 16 | Window (system-provided; do not draw) |
 
 ### 3.5 Animation
 
 | Motion | Curve | Duration |
 | --- | --- | --- |
-| Popover present | `.easeOut` | 180 ms (system default) |
-| Recording dot pulse | `.easeInOut` repeat-forever | 1.6 s |
-| Toggle, segmented selection | `.easeInOut` | 150 ms |
-| Waveform bars | independent `repeat-forever` per bar | 1.2 s |
+| Popover present | system default | — |
+| Recording dot pulse | `.easeInOut`.repeatForever | 1.6 s |
+| `Toggle`, segmented selection | `.easeInOut` | 150 ms |
+| Sidebar collapse | system default (NavigationSplitView) | — |
+| Waveform bars | `TimelineView(.animation)` | per frame |
+
+Wrap pulse / waveform in `if !accessibilityReduceMotion`. See §10.
 
 ---
 
-## 4. Surface 1 — Menu Bar extra
+## 4. What the mock fakes vs what SwiftUI provides
 
-### 4.1 Structure
+This section eliminates the largest class of port bugs. Read carefully.
 
-```swift
-MenuBarExtra("Hippo", systemImage: "h.circle.fill") {
-    StatusPopoverRoot()        // ReviewPopover OR StatusPopover, picked by state
-        .frame(width: 320)
-}
-.menuBarExtraStyle(.window)    // window-style, not menu-style
+| Mock element | What the mock does | What SwiftUI does | Action |
+| --- | --- | --- | --- |
+| Traffic lights at top-left of sidebar / collapsed page | Draws three 12-pt circles | macOS draws real ones in the window titlebar | **Delete from your impl.** Trust the window chrome. |
+| 32-pt title slice with "Chat" + "Hippo · local agent" | Manual `HStack` inside content | `.navigationTitle("Chat").navigationSubtitle("Hippo · local agent")` renders in window titlebar | Use `.navigationTitle(...)` + `.navigationSubtitle(...)`. **Do not** render a duplicate 32-pt strip. |
+| Sidebar toggle button next to traffic lights | A custom `<button>` | `NavigationSplitView` provides one automatically (or you can place a custom one as `ToolbarItem(.navigation)`) | Use the system one. If you don't like its position, remove with `.toolbar(removing: .sidebarToggle)` and add `ToolbarItem(.navigation) { customToggle }`. Never both. |
+| Aurora wallpaper outside the window | Painted by the mock | macOS shows the real desktop | Not your concern. |
+| Popover arrow notch | None (correctly) | `MenuBarExtra` window-style has no notch | OK. Don't add one. |
+
+After applying this section, your **PageShell** should be only two pieces:
+
+```
+PageShell
+├── (the 44-pt filter row — manual HStack)
+└── (scrollable content)
 ```
 
-### 4.2 Menu bar icon
-
-- Custom `HippoGlyph` (Hippo head, 16 × 16). Provide as PDF + Symbol set so it tints automatically.
-- **Show a 5-pt red status dot** next to the glyph when `services.ownscribe.state == .recording`.
-  Implement with `Image(systemName: "circle.fill").foregroundStyle(.red)` overlaid bottom-right.
-- **No "REC" text pill** — the dot is sufficient. (This is the bug we fixed in mock v3.)
-- Selected state is handled by the system when the popover is open.
-
-### 4.3 Idle / Recording popover (artboard 01)
-
-Width 320, light material, **no arrow notch** (macOS 26 menu-bar popovers don't draw one).
-
-Sections separated by `Divider()` (full-width hairlines). Vertical order:
-
-1. **Header** — 28 × 28 Hippo tile (`LinearGradient` orange→red), title `"Hippo"`, subtitle session name + elapsed.
-2. **Status row** — waveform on the left, status label + clock on the right. Big primary action below:
-   - `Stop Jarvis` (destructive filled red, `PushButton.stop`) — full width
-   - `Capture` (neutral bordered) — fixed width, trailing
-3. **Services list** — four rows: `OpenChronicle`, `ownscribe`, `cua-driver`, `vlmac`. Each row:
-   `Image(systemName:)` 20 × 20 leading, name, trailing detail in secondary text, trailing `StatusDot`.
-4. **Footer toolbar** — left: `activity`, `book`, `gear` symbol buttons. Right: locale + refresh.
-
-### 4.4 Review popover (artboard 02)
-
-Same window; SwiftUI switches body when `state.currentTask?.state == .awaitingReview`:
-
-1. **Header** — Hippo tile, title `"Ready to act"`, subtitle `"1 task · awaiting review"`.
-2. **Hero** — small blue "Active Task" capsule, 17 pt Bold title, 13 pt secondary body.
-3. **Metadata strip** — 3-column inset block: `Surface` · `Confidence` · `Mode`.
-4. **Proposed actions** — numbered rows (1, 2…) inside a card.
-5. **Actions row** — `Insert draft` preferred + `Ignore` neutral, then `Open in Activity →` link.
-
-Both popovers must dismiss the moment the user clicks outside (`scenePhase` `.background`).
+Title and subtitle live in the window via `.navigationTitle()` / `.navigationSubtitle()`. **There
+is no 32-pt title slice in the native implementation.** The mock fakes one because the browser
+has no titlebar API.
 
 ---
 
-## 5. Surface 2 — Dashboard window (1280 × 800 default)
+## 5. Window architecture
+
+### 5.1 `@main`
 
 ```swift
-WindowGroup(id: "dashboard") {
-    DashboardWindow()
-        .frame(minWidth: 1024, minHeight: 640, idealWidth: 1280, idealHeight: 800)
-}
-.defaultSize(width: 1280, height: 800)
-.windowToolbarStyle(.unified(showsTitle: true))
-```
+@main
+struct HippoJarvisApp: App {
+    @StateObject private var state = AppState()
 
-### 5.1 Sidebar (240 wide, collapsible)
+    var body: some Scene {
+        // Menu bar entry
+        MenuBarExtra("Hippo", image: "HippoGlyph") {
+            PopoverHost()
+                .environmentObject(state)
+                .frame(width: 320)
+        }
+        .menuBarExtraStyle(.window)
 
-`NavigationSplitView` left column. Compose with `List` in `.sidebar` style:
-
-1. **Titlebar row** — 32 pt; left-to-right: traffic lights, `Divider` 0.5 pt vertical, **sidebar toggle** (`sidebar.left`). The same toggle icon is used in both expanded and collapsed states; clicking flips the visibility.
-2. **Hippo identity row** — 22 × 22 gradient tile, `Hippo` title, pulsing recording line.
-3. **Activity items**:
-   - `Chat` (`bubble.left.and.bubble.right.fill`, blue "Beta" pill)
-   - `Live Signal` (`waveform.path.ecg`, badge `12`)
-   - `Active Task` (`target`, blue badge `1` when a task awaits review)
-   - `Sessions` (`clock.arrow.circlepath`)
-4. **Library section header** — `"Library"` with `+` action button (creates a new skill from current selection).
-5. **Skill rows** — one row per `Skill`, sorted desc by `created_at`. Leading: sparkle symbol. Trailing: relative date.
-6. **Footer** — gear button (opens Settings page) + orchestrator status (`StatusDot` + `127.0.0.1:8787`).
-
-#### 5.1.1 Collapsed state
-
-The sidebar collapses **fully** (not to a rail). SwiftUI:
-
-```swift
-@State private var sidebarVisible: NavigationSplitViewVisibility = .all
-
-NavigationSplitView(columnVisibility: $sidebarVisible) { Sidebar() }
-    detail: { DetailPane() }
-```
-
-When `sidebarVisible == .detailOnly`:
-- The sidebar pane is hidden completely (no rail).
-- The detail pane's titlebar **prepends** the chrome that lived in the sidebar header: traffic lights, a 0.5 pt vertical hairline, and the same `sidebar.left` toggle (which now expands the sidebar back). 22 × 22 hit target, no fill.
-- The page title from `PageShell` still appears immediately after, so the user always knows which view they're on.
-- The detail pane's 44 pt toolbar row is unchanged.
-
-`PageShell` reads a `@Environment(\.sidebarVisible)` (or equivalent) and conditionally renders the prepended chrome via a `leading:` slot. Page authors don't need to know about collapse state — the shell handles it. **Every view** (`ChatView`, `LiveSignalView`, `ActiveTaskView`, `SessionsView`, `SkillView`, `SettingsView`) inherits this behavior automatically.
-
-The mock ships a collapsed variant of all five primary detail views — see the artboards listed in §15. They are visually identical to their expanded counterparts except for the sidebar being hidden and the toggle / traffic-lights moving into the page title row.
-
-Persist `sidebarVisible` in `@SceneStorage("hippo.dashboard.sidebar")` so it survives launch.
-
-Selection model: `@State selection: DashboardRoute` where `DashboardRoute` is an enum
-`{ chat, liveSignal, activeTask, sessions, skill(id), settings }`. Skill rows pass the id.
-
-### 5.2 Detail pane
-
-`NavigationSplitView` right column hosts a `switch selection`:
-
-| Route | View |
-| --- | --- |
-| `.chat` | `ChatView` |
-| `.liveSignal` | `LiveSignalView` |
-| `.activeTask` | `ActiveTaskView` |
-| `.sessions` | `SessionsView` |
-| `.skill(id)` | `SkillView(id:)` |
-| `.settings` | `SettingsView` |
-
-Every detail view follows the same chrome: **32 pt titlebar slice** (label only, no extra controls)
-then a **44 pt toolbar slice** (segmented control + spacer + actions), then scrollable content.
-Implement the chrome as a single `DetailHeader` view to avoid drift.
-
-### 5.3 Chat — `ChatView`
-
-The agentic conversation surface, modelled on Manus's empty state. Lets the user assign one-off
-tasks ("draft a follow-up to Hana", "summarize last session", "generate a skill for X") that fall
-outside the auto-capture flow. Chats hold a reference to a session and to a model.
-
-- **Toolbar.** Segmented `Chat / Recent / Templates`. Trailing: `ModelPicker` (capsule, e.g. `Hippo Mini · local`) + `square.and.pencil` compose button.
-- **Empty state.** Centered max-width 720 column:
-  1. **Session pill** — round capsule showing the live session (`StatusDot.rec`, `"Active session · investor sync"`) with an inline `Attach` button that pins the current session as context.
-  2. **Hero** — 42 pt serif heading (`New York Regular`, `-0.02em`): "What should Hippo do?". Pin the *serif* font here; **everything else in the dashboard stays SF Pro**.
-  3. **Composer** — 18 pt-radius card, white-ish fill, 0.5 pt hairline, padding 16. Two zones:
-     - Multi-line `TextEditor` (treat 56 pt as `minHeight`). Placeholder: "Assign a task, ask Hippo to draft something, or describe what to capture next…"
-     - Bottom action row: a `+` circle (radius 100, 30 pt), inline tool-chip group (three colored tool dots `+ N`), a `display` circle, spacer, `livephoto`, `mic.fill`, then a 30 pt arrow-up send button.
-  4. **Connect-tools hint** — thin 100-radius bar with `wrench.and.screwdriver` + label `"Connect more tools to Hippo"` + a row of 18 pt rounded brand badges + a dismiss `xmark`.
-  5. **Suggestion chips** — wrap-flow of 32 pt pill buttons (`Generate a skill`, `Draft follow-up`, `Summarize last session`, `Start capture`, …, `More`).
-  6. **Recent threads** — 12 pt-radius rounded card listing past chats. Each row: 28 pt rounded tinted tile + title + secondary `"3 turns · uses Mail · 2 min ago"` + trailing chevron.
-- **Active state.** When a thread has messages, swap the empty state for a `ScrollView`-of-bubbles. The composer **stays pinned to the bottom** with the same control row; the session-pill and `New York` hero collapse into a 13 pt header.
-- **Streaming.** Use `URLSession.bytes` against `/chat/stream` (forthcoming Orchestrator endpoint). Render incoming tokens into a `Text` buffer. Animate insertion with `.transition(.opacity)`. Cancel on user `⌘⌥⌫`.
-- **Tool calls.** When the agent emits a tool call, render it as a collapsed inline strip in the bubble (`wrench.and.screwdriver` + tool name + result preview). Click expands a sheet showing arguments/result.
-- **References.** A chat may reference a `Session`, a `Skill`, or an `ActiveTask` (drag-drop or `@` mention). References render as 22 pt rounded tinted chips inline with the user's message.
-
-### 5.4 Live Signal — `LiveSignalView`
-
-- Toolbar: `Picker("Filter", selection:)` rendered `.pickerStyle(.segmented)` with `All / Signals / Tasks / Artifacts`.
-- Right side: SSE indicator (`StatusDot(.green, pulse: true)` + `"SSE · /events"`), search field, refresh button.
-- Content: `ForEach(sessions)` grouped by session. Group header includes session title, "Active" pill if live, duration. Inside each group: list of `Event` rows in a single rounded container.
-- `Event` row layout: 70 pt monospace time column · 22 × 22 typed glyph (color per type) · title + secondary body + optional meta in mono.
-
-Event types and their accent colors (matches `EVENT_TYPE` in the mock):
-| Type | Color | Source event |
-| --- | --- | --- |
-| `task` | blue | `active_task_generated` |
-| `artifact` | green | `artifact_ready` |
-| `asr` | green | `transcript_finalized` |
-| `sop` | amber | `sop_capture_started/closed` |
-| `session` | red | `session_started/stopped` |
-
-### 5.5 Active Task — `ActiveTaskView`
-
-- Toolbar: 3-tab segmented `Awaiting (n) / Completed / Ignored`. Trailing: `Ignore` + `Insert draft`.
-- Centered max-width 820 column.
-- **Hero**: blue "Awaiting review" capsule, 28 pt Bold title, 15 pt secondary body.
-- **Metadata strip**: 4 cells with internal `Divider()`s — `Surface · Confidence · Source · Insertion`.
-- **Proposed actions** card — numbered rows; trailing `Ready` green capsule per action.
-- **Recent** card — past tasks with a `Completed` / `Ignored` capsule.
-
-When `state.currentTask` is nil, show an empty state ("No task awaiting review. Live signal continues in the background.") + a link to `LiveSignal`.
-
-### 5.6 Sessions — `SessionsView`
-
-- Single `Table(sessions)` with columns: `Session` (icon + title + monospaced id), `Started`,
-  `Duration` (right-aligned monospace), `Artifacts` (right-aligned monospace), `State` (pill),
-  trailing chevron. Selected row tinted `rgba(0,0,0,0.04)`.
-- State pill values: `Active Task` (blue), `Completed` (green), `Ignored` (gray).
-- Clicking a row navigates to a session-detail view (out of scope for this PR; placeholder ok).
-
-### 5.7 Skill Library — `SkillView`
-
-- Toolbar: 2-icon segmented `Preview / Source`. Right: search field + `Generate` + `Run skill`.
-- Body: centered 720-wide column rendering markdown. Use `AttributedString(markdown:)` and
-  custom paragraph styles for `H2`, lists, code blocks, callouts.
-- **Mock callout** — amber bordered box reminding the user this version writes `inserted_mock`.
-
-### 5.8 Settings — `SettingsView`
-
-Styled as a self-contained preferences pane inside the dashboard (not the system Settings app).
-
-- Toolbar: segmented `General / Services / Recording / Permissions / About`.
-- Content: stacked `FormSection`s (centered max-width 760):
-  1. **Orchestrator** — Base URL (`TextField`), Status (`StatusDot` + text), Auto-launch (`Toggle`).
-  2. **Services** — One row per adapter: `StatusDot`, monospace name, secondary detail, version, chevron.
-  3. **OpenChronicle** — Daemon control buttons (Start/Pause/Stop), Capture (Capture once / Timeline tick), Captures index (Rebuild).
-  4. **Permissions** — Mic / Screen Recording / Accessibility, each with a `Granted` / `Not granted` pill and a Manage / Open Settings button. Always defer the actual grant to `System Settings.app` via `NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security"))`.
-  5. **About** — build string + Export diagnostics.
-
-`FormSection` = a header label above + a rounded white-ish `RoundedRectangle` with internal `Divider()`s between rows. Each row is 44 pt tall, padding 14.
-
----
-
-## 6. Components inventory
-
-### 6.1 `PushButton`
-
-```swift
-enum PushButtonVariant { case preferred, destructive, stop, neutral, glass, plain }
-enum PushButtonSize    { case sm, md, lg }     // h 20 / 24 / 28
-```
-
-- All variants: `RoundedRectangle(cornerRadius: 6)`, SF Pro Medium 13.
-- `.preferred` → fill `rgb(13,111,255)`, white label, inset highlight.
-- `.destructive` → white bg + `rgb(255,56,60)` label.
-- `.stop` → fill `rgb(255,56,60)`, white label.
-- `.neutral` → `rgba(255,255,255,0.9)` bg + `rgba(0,0,0,0.10)` border.
-- `.glass` → `rgba(255,255,255,0.5)` + 20 px blur (popover footer).
-- `.plain` → no chrome.
-
-Implement once in `DesignSystem/PushButton.swift`. Use `ButtonStyle` so callers stay terse:
-`Button("Insert draft") { … }.buttonStyle(.preferred)`.
-
-### 6.2 `SegmentedControl`
-
-`Picker(...) { ForEach(...) }.pickerStyle(.segmented)`. Add a custom modifier that renders the
-height-28 capsule style if the default `.segmented` doesn't match the mock; otherwise leave as-is.
-
-### 6.3 `StatusDot`
-
-Two states matter: solid (always-on health), and `pulse` (recording). For pulse:
-
-```swift
-@State private var pulse = false
-Circle()
-    .scaleEffect(pulse ? 1.4 : 1)
-    .opacity(pulse ? 0.7 : 1)
-    .onAppear { withAnimation(.easeInOut(duration: 0.8).repeatForever(autoreverses: true)) { pulse = true } }
-```
-
-### 6.4 `ListRow` / `FormRow`
-
-Two heights:
-- 28 pt sidebar item (icon + label + badge), radius 8, selected fill `rgba(0,0,0,0.11)`.
-- 44 pt form row (label/subtitle on left, control on right), bottom `Divider()` except last.
-
-### 6.5 `Toggle` (custom)
-
-Apple's default `Toggle().toggleStyle(.switch)` already renders correctly in macOS 26. Use it.
-
-### 6.6 `MetadataCell`
-
-Used in popover hero and task metadata strip. Compact two-line cell:
-
-```swift
-VStack(alignment: .leading, spacing: 2) {
-    Text(label.uppercased()).font(.caption2).foregroundStyle(.secondary)
-    Text(value).font(.system(size: 14, weight: .semibold))
+        // Dashboard window
+        Window("Hippo Dashboard", id: "dashboard") {
+            DashboardWindow()
+                .environmentObject(state)
+        }
+        .defaultSize(width: 1280, height: 800)
+        .windowResizability(.contentMinSize)
+        // Default chrome — traffic lights provided by the system
+    }
 }
 ```
 
-Wrap in a `HStack` with `Divider()` between cells for the strip layout.
-
-### 6.7 `Waveform`
-
-13 vertical bars, 2.5 wide, gap 2.5, heights driven by an array; each bar animates with its own
-phase offset. SwiftUI:
+### 5.2 `DashboardWindow`
 
 ```swift
-TimelineView(.animation) { context in
-    let t = context.date.timeIntervalSinceReferenceDate
-    HStack(spacing: 2.5) {
-        ForEach(0..<13) { i in
-            let h = (sin(t * 5 + Double(i) * 0.7) + 1) * 12 + 6
-            Capsule().fill(.linearGradient(...)).frame(width: 2.5, height: h)
+struct DashboardWindow: View {
+    @EnvironmentObject var state: AppState
+    @SceneStorage("hippo.dashboard.sidebarVisible")
+        private var visibility: NavigationSplitViewVisibility = .all
+    @SceneStorage("hippo.dashboard.route")
+        private var route: DashboardRoute = .liveSignal
+
+    var body: some View {
+        NavigationSplitView(columnVisibility: $visibility) {
+            Sidebar(route: $route)
+                .navigationSplitViewColumnWidth(min: 220, ideal: 240, max: 260)
+        } detail: {
+            Detail(route: route)
+        }
+        .navigationSplitViewStyle(.balanced)
+        .toolbar(removing: .sidebarToggle)        // hide system toggle
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    withAnimation { visibility = (visibility == .all ? .detailOnly : .all) }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                }
+                .help(visibility == .all ? "Hide sidebar" : "Show sidebar")
+            }
         }
     }
 }
 ```
 
+The window minimum is **1024 × 640**. Below that, the Chat composer's max-width 720 column starts
+clipping; below that the Live Signal table starts wrapping. Don't go lower.
+
+### 5.3 `DashboardRoute`
+
+```swift
+enum DashboardRoute: Hashable, Codable {
+    case chat
+    case liveSignal
+    case activeTask
+    case sessions
+    case skill(UUID)
+    case settings
+}
+```
+
+Default route at first launch = `.liveSignal`. If `state.currentTask?.state == .awaitingReview`
+at launch, switch to `.activeTask`. Persist in `@SceneStorage`.
+
+### 5.4 `Detail` switch
+
+```swift
+struct Detail: View {
+    let route: DashboardRoute
+    var body: some View {
+        switch route {
+        case .chat:        ChatView()
+        case .liveSignal:  LiveSignalView()
+        case .activeTask:  ActiveTaskView()
+        case .sessions:    SessionsView()
+        case .skill(let id): SkillView(id: id)
+        case .settings:    SettingsView()
+        }
+    }
+}
+```
+
+Every detail view is wrapped in `PageShell` (defined below).
+
 ---
 
-## 7. State & data flow
+## 6. Reusable components — Swift code
 
-### 7.1 `AppState`
+### 6.1 `PageShell`
+
+The detail-view chrome. **Owns only the 44-pt filter row** (no title strip — that's the window
+titlebar).
+
+```swift
+struct PageShell<Filter: View, Body_: View>: View {
+    let title: String
+    let subtitle: String?
+    @ViewBuilder var filter: () -> Filter
+    @ViewBuilder var body_: () -> Body_
+
+    var body: some View {
+        VStack(spacing: 0) {
+            // 44-pt filter row — NOT the system .toolbar
+            HStack(spacing: 8) { filter() }
+                .frame(height: 44)
+                .padding(.horizontal, 14)
+                .overlay(alignment: .bottom) { HHairline() }
+
+            // Content area
+            body_()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .navigationTitle(title)
+        .if(subtitle != nil) { $0.navigationSubtitle(subtitle!) }
+    }
+}
+```
+
+Notes:
+- The filter row is **always 44 pt** outer height. Don't add vertical padding to its children;
+  vertical-center them inside the row.
+- `HHairline` (§6.7) is 0.5 pt.
+- The `subtitle` becomes `.navigationSubtitle` — it appears below the title in the window
+  titlebar (macOS 15+).
+
+### 6.2 `SegmentedPill` (custom, NOT the system Picker)
+
+The mock's segmented control is a **capsule with inner-padded cells**. It is **not** the SwiftUI
+`.pickerStyle(.segmented)`, which is wider, taller, and uses a different selection treatment.
+
+```swift
+struct SegmentedPill<Option: Hashable>: View {
+    @Binding var selection: Option
+    let options: [(value: Option, label: String, glyph: String?, badge: Int?)]
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(options, id: \.value) { opt in
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { selection = opt.value }
+                } label: {
+                    HStack(spacing: 5) {
+                        if let g = opt.glyph { Image(systemName: g) }
+                        Text(opt.label)
+                        if let b = opt.badge {
+                            Text("\(b)").font(.system(size: 10, weight: .semibold))
+                                .padding(.horizontal, 5).frame(height: 14)
+                                .background(badgeBg(opt.value == selection), in: Capsule())
+                                .foregroundStyle(opt.value == selection ? .white : .secondary)
+                        }
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .padding(.horizontal, 10)
+                    .frame(minWidth: 36, idealHeight: 24).frame(height: 24)
+                    .background(
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
+                            .fill(opt.value == selection ? Color(white: 1).opacity(0.95) : .clear)
+                            .shadow(color: opt.value == selection ? .black.opacity(0.06) : .clear,
+                                    radius: 0.5, y: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2)
+        .background(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .fill(.black.opacity(0.05))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(.black.opacity(0.08), lineWidth: 0.5))
+        )
+    }
+
+    private func badgeBg(_ selected: Bool) -> some ShapeStyle {
+        selected ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(Color.black.opacity(0.12))
+    }
+}
+```
+
+The outer pill is **28 pt** tall. Don't add `.frame(height:)` to the inner cells beyond the
+explicit `24` shown. Tracking measurements:
+
+- Outer pill: `RoundedRectangle(7)`, fill `black.opacity(0.05)`, stroke 0.5pt.
+- Inner padding: 2 pt all sides.
+- Inner cell: `RoundedRectangle(5)`, 24 pt tall, 10 pt horizontal padding, 36 pt min width.
+- Selected cell fill: white opacity 0.95, shadow 0.5/0.06 1y.
+- Cell label: SF Pro Medium 12 pt.
+
+### 6.3 `PushButton` (as a `ButtonStyle`)
+
+```swift
+enum PushButtonVariant { case preferred, neutral, destructive, stop, glass, plain }
+enum PushButtonSize    { case sm, md, lg }
+
+struct PushButtonStyle: ButtonStyle {
+    var variant: PushButtonVariant = .neutral
+    var size: PushButtonSize = .md
+    var fullWidth: Bool = false
+
+    func makeBody(configuration: Configuration) -> some View {
+        let (h, hp, fs): (CGFloat, CGFloat, CGFloat) = {
+            switch size {
+            case .sm: return (20, 10, 12)
+            case .md: return (24, 16, 13)
+            case .lg: return (28, 18, 14)
+            }
+        }()
+        configuration.label
+            .font(.system(size: fs, weight: .medium))
+            .padding(.horizontal, hp)
+            .frame(height: h)
+            .frame(maxWidth: fullWidth ? .infinity : nil)
+            .foregroundStyle(fg)
+            .background(bg(configuration.isPressed), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(stroke, lineWidth: 0.5))
+            .shadow(color: shadow, radius: 1.5, y: 1)
+            .opacity(configuration.isPressed ? 0.85 : 1)
+            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+    }
+    private var fg: Color {
+        switch variant {
+        case .preferred, .stop: return .white
+        case .destructive:      return .red
+        case .neutral, .glass:  return .primary
+        case .plain:            return .primary
+        }
+    }
+    private func bg(_ pressed: Bool) -> some ShapeStyle {
+        switch variant {
+        case .preferred:    return AnyShapeStyle(Color.accentColor)
+        case .stop:         return AnyShapeStyle(Color.red)
+        case .destructive,
+             .neutral:      return AnyShapeStyle(Color.white.opacity(0.9))
+        case .glass:        return AnyShapeStyle(.thickMaterial)
+        case .plain:        return AnyShapeStyle(Color.clear)
+        }
+    }
+    private var stroke: Color {
+        variant == .plain ? .clear : .black.opacity(0.10)
+    }
+    private var shadow: Color {
+        switch variant {
+        case .preferred, .stop, .destructive, .neutral: return .black.opacity(0.06)
+        default: return .clear
+        }
+    }
+}
+
+extension View {
+    func pushButtonStyle(_ variant: PushButtonVariant, size: PushButtonSize = .md, fullWidth: Bool = false) -> some View {
+        buttonStyle(PushButtonStyle(variant: variant, size: size, fullWidth: fullWidth))
+    }
+}
+```
+
+Usage:
+```swift
+Button("Insert draft") { … }.pushButtonStyle(.preferred)
+Button("Stop Jarvis") { … }.pushButtonStyle(.stop, size: .md, fullWidth: true)
+Button("Ignore") { … }.pushButtonStyle(.neutral)
+```
+
+### 6.4 `StatusDot`
+
+```swift
+struct StatusDot: View {
+    enum State { case ok, warn, error, busy, rec, idle }
+    let state: State
+    var pulse: Bool = false
+    var size: CGFloat = 6
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1/30, paused: !pulse || reduceMotion)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            let phase = pulse && !reduceMotion ? (sin(t * 2 * .pi / 1.6) + 1) * 0.5 : 1.0
+            ZStack {
+                if pulse && !reduceMotion {
+                    Circle().fill(color).opacity(0.25 + 0.25 * phase)
+                        .frame(width: size + 6 * phase, height: size + 6 * phase)
+                }
+                Circle().fill(color).frame(width: size, height: size)
+                    .overlay(Circle().stroke(.white.opacity(0.4), lineWidth: 0.5))
+            }
+        }
+    }
+    private var color: Color {
+        switch state {
+        case .ok:    return .green
+        case .warn:  return .orange
+        case .error: return .red
+        case .busy:  return .accentColor
+        case .rec:   return .red
+        case .idle:  return Color(white: 0.7)
+        }
+    }
+}
+```
+
+### 6.5 `MetadataCell` and metadata strip
+
+The Active Task metadata strip is **4 cells with vertical hairlines between them**, each cell
+two-line (label uppercase 10pt above value 14pt). Total strip height ~52pt with 12pt vertical
+padding.
+
+```swift
+struct MetadataCell: View {
+    let label: String
+    let value: String
+    var mono: Bool = false
+    var muted: Bool = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(label.uppercased())
+                .font(.system(size: 10, weight: .semibold)).tracking(0.04)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 14, weight: .semibold, design: mono ? .monospaced : .default))
+                .foregroundStyle(muted ? .secondary : .primary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 16)
+    }
+}
+
+struct MetadataStrip: View {
+    let cells: [(label: String, value: String, mono: Bool, muted: Bool)]
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(Array(cells.enumerated()), id: \.offset) { i, c in
+                if i > 0 { VHairline() }
+                MetadataCell(label: c.label, value: c.value, mono: c.mono, muted: c.muted)
+            }
+        }
+        .padding(.vertical, 12)
+        .background(.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(.black.opacity(0.08), lineWidth: 0.5))
+    }
+}
+```
+
+### 6.6 `Toggle` — explicit size
+
+macOS's default `Toggle().toggleStyle(.switch)` is 50 × 31. The mock uses 36 × 22. Use either:
+
+```swift
+Toggle("", isOn: $on).labelsHidden().toggleStyle(.switch).controlSize(.mini)
+```
+
+…or build a custom one:
+
+```swift
+struct PillToggle: View {
+    @Binding var isOn: Bool
+    var body: some View {
+        ZStack(alignment: isOn ? .trailing : .leading) {
+            Capsule().fill(isOn ? Color.green : Color.black.opacity(0.18))
+                .frame(width: 36, height: 22)
+            Circle().fill(.white)
+                .frame(width: 20, height: 20).padding(1)
+                .shadow(color: .black.opacity(0.18), radius: 2, y: 2)
+        }
+        .animation(.easeInOut(duration: 0.15), value: isOn)
+        .onTapGesture { isOn.toggle() }
+    }
+}
+```
+
+### 6.7 Hairlines
+
+Use `Divider()` for a horizontal hairline below a row — it's 0.5pt on macOS 11+. For a **vertical**
+hairline (between metadata cells, between sidebar sections, etc.), `Divider()` doesn't work —
+build it explicitly:
+
+```swift
+struct HHairline: View { var body: some View {
+    Rectangle().fill(Color.separator.opacity(0.6)).frame(height: 0.5)
+} }
+
+struct VHairline: View { var body: some View {
+    Rectangle().fill(Color.separator.opacity(0.6)).frame(width: 0.5).padding(.vertical, 4)
+} }
+```
+
+### 6.8 `Waveform`
+
+```swift
+struct Waveform: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1/30, paused: reduceMotion)) { ctx in
+            let t = ctx.date.timeIntervalSinceReferenceDate
+            HStack(spacing: 2.5) {
+                ForEach(0..<13, id: \.self) { i in
+                    let phase = reduceMotion ? 1.0 : (sin(t * 5 + Double(i) * 0.7) + 1) * 0.5
+                    Capsule()
+                        .fill(LinearGradient(colors: [.orange, .red], startPoint: .top, endPoint: .bottom))
+                        .frame(width: 2.5, height: 6 + CGFloat(phase) * 18)
+                }
+            }
+            .frame(height: 24)
+        }
+    }
+}
+```
+
+### 6.9 `HippoGlyph` — the one custom symbol
+
+Ship as `Assets.xcassets/HippoGlyph.symbolset`. Source SVG path (copy verbatim into the symbol's
+"Regular Medium" vector):
+
+```
+<svg viewBox="0 0 24 24">
+  <path d="M5 13c0-3.5 3.1-6.5 7-6.5s7 3 7 6.5v3a2 2 0 01-2 2h-2.2a.8.8 0 01-.8-.8v-.6
+           c0-1.4-1.3-2.6-3-2.6s-3 1.2-3 2.6v.6a.8.8 0 01-.8.8H4.5A.5.5 0 014 18v-1
+           c0-2 .4-3 1-4z" fill="currentColor"/>
+  <circle cx="15.5" cy="11" r="0.9" fill="white"/>
+  <circle cx="9.5"  cy="11" r="0.9" fill="white"/>
+</svg>
+```
+
+The symbol must be set to **template image** so it inherits tint. Use it at 16 pt (menu bar),
+22 pt (sidebar identity row), and 28 pt (popover header tile).
+
+---
+
+## 7. Surface specs
+
+### 7.1 Menu bar extra
+
+```swift
+MenuBarExtra { PopoverHost() }
+    label: {
+        ZStack(alignment: .bottomTrailing) {
+            Image("HippoGlyph").renderingMode(.template)
+                .resizable().frame(width: 16, height: 16)
+            if state.snapshot.services.ownscribe == .recording {
+                Circle().fill(.red).frame(width: 5, height: 5)
+                    .symbolEffect(.pulse, isActive: !reduceMotion)
+            }
+        }
+    }
+    .menuBarExtraStyle(.window)
+```
+
+- No "REC" text pill — just the dot.
+- The menu-bar icon must be a **template** image (renderingMode `.template`) so macOS tints it for
+  selected/menu-bar-color states.
+
+### 7.2 Status popover (idle / recording)
+
+Width **320 pt**. Sections, top to bottom, separated by `Divider()`:
+
+| # | Section | Height | Content |
+| --- | --- | --- | --- |
+| 1 | Header | 56 pt | 28 × 28 Hippo tile (gradient orange→red), title "Hippo" (semibold 13), subtitle "Investor sync · 04:12" (regular 11 secondary), trailing `ellipsis.circle` |
+| 2 | Status | 80 pt | `Waveform` 50×24 — title "Listening" (semibold 13) + subtitle "Audio + window context" (11 secondary) — right-aligned timer (semibold 17 mono digits) |
+| 2b | Primary actions | 32 pt | `Stop Jarvis` (`pushButtonStyle(.stop, fullWidth: true)`) + `Capture` (`.neutral`), `HStack(spacing: 8)` |
+| 3 | Services | 4 × 32 pt | One row per adapter, see below |
+| 4 | Footer toolbar | 36 pt | Left: 3 symbol buttons (`waveform.path.ecg`, `sparkles`, `gearshape`). Right: locale label + `arrow.clockwise` |
+
+Service row layout (32 pt outer height):
+```swift
+HStack(spacing: 10) {
+    SymbolTile(systemName: glyph, size: 20)          // 20×20 grey tile, radius 6
+    Text(name).font(.system(size: 13, weight: .medium))
+    Spacer()
+    Text(detail).font(.system(size: 11)).foregroundStyle(.secondary)
+    StatusDot(state: state, pulse: state == .rec, size: 6)
+}.padding(.horizontal, 12)
+```
+
+Services in order: **OpenChronicle, ownscribe, cua-driver, vlmac**. Do not re-order.
+
+### 7.3 Review popover
+
+Same window as Status. Routing in `PopoverHost`:
+
+```swift
+if let task = state.snapshot.currentTask, task.state == .awaitingReview {
+    ReviewPopover(task: task).transition(.opacity)
+} else {
+    StatusPopover().transition(.opacity)
+}
+```
+
+Layout, top to bottom:
+
+| # | Section | Content |
+| --- | --- | --- |
+| 1 | Header | Same Hippo tile, title "Ready to act", subtitle "1 task · awaiting review" |
+| 2 | Hero | 6-pt-gap VStack: blue "Active Task" capsule (10×3) + 17-pt Bold title + 13-pt secondary body (3-line max) |
+| 3 | Metadata strip | `MetadataStrip` 3 cells — `Surface`, `Confidence`, `Mode` |
+| 4 | Proposed actions | "PROPOSED" section header (caption.bold), then 2 numbered rows (1 / 2) — each 32-pt with leading number tile, title, trailing tiny grey detail |
+| 5 | Actions | `Insert draft` (`.preferred`, fullWidth=true) + `Ignore` (`.neutral`), `HStack(spacing: 8)`, padding `(.top, 10)` |
+| 5b | Link | `Open in Activity →` plain button below actions, full width |
+
+Both popovers dismiss on outside-click (system default for `.menuBarExtraStyle(.window)`).
+
+### 7.4 Sidebar
+
+The sidebar's content does **not** include traffic lights or a sidebar toggle — those are in the
+window chrome.
+
+```swift
+struct Sidebar: View {
+    @Binding var route: DashboardRoute
+    @EnvironmentObject var state: AppState
+
+    var body: some View {
+        List(selection: $route) {
+            HippoIdentityRow()                          // hippo tile + name + rec status
+                .listRowInsets(.init(top: 8, leading: 8, bottom: 14, trailing: 8))
+
+            Section {
+                SidebarRow(.chat,        glyph: "bubble.left.and.bubble.right.fill", label: "Chat",       trailingPill: "BETA")
+                SidebarRow(.liveSignal,  glyph: "waveform.path.ecg",                 label: "Live Signal",badge: state.events.count.map(String.init))
+                SidebarRow(.activeTask,  glyph: "target",                            label: "Active Task",accentBadge: pendingTaskCount)
+                SidebarRow(.sessions,    glyph: "clock.arrow.circlepath",            label: "Sessions")
+            }
+
+            Section("Library") {
+                ForEach(state.skills) { skill in
+                    SkillRow(.skill(skill.id), name: skill.name, sub: skill.relativeDate, dim: skill.older)
+                }
+            }
+        }
+        .listStyle(.sidebar)
+        .safeAreaInset(edge: .bottom) { SidebarFooter() }
+    }
+}
+```
+
+- `List` with selection of `DashboardRoute` — clicking a row sets the route.
+- Sidebar rows are **28 pt** tall. The selected row gets `selection.bg` tint automatically when
+  using `.listStyle(.sidebar)` + `selection:` binding — **do not** draw your own selection box.
+- `SidebarFooter` is the gear button + Orchestrator status line, pinned at the bottom via
+  `.safeAreaInset(.bottom)`.
+
+Selected-row label and symbol use `Color.accentColor` automatically with `.sidebar` style. Do not
+hard-code blue.
+
+### 7.5 Chat — `ChatView`
+
+This is the only view that uses a serif font (for the hero).
+
+Layout (when no active thread):
+
+```
+PageShell(title: "Chat", subtitle: "Hippo · local agent",
+          filter: { SegmentedPill(...) + Spacer() + ModelPicker() + composeButton })
+{
+  VStack {
+    Spacer()
+    VStack(spacing: 22) {                     // empty-state stack, max-width 720, centered
+      SessionPill()                            // Active session · investor sync [Attach]
+      Text("What should Hippo do?")
+          .font(.system(size: 42, weight: .regular, design: .serif))
+          .multilineTextAlignment(.center)
+      Composer()                               // see below — radius 18, padding 16
+      ConnectToolsBar()                        // thin pill — wrench + tools row + xmark
+      SuggestionChips()                        // wrap-flow, centered
+      RecentThreads()                          // 12-radius card, 3 rows
+    }
+    .frame(maxWidth: 720).padding(.horizontal, 28)
+    Spacer()
+  }
+}
+```
+
+#### Composer (the key composer measurements)
+
+```
+- Outer card: RoundedRectangle(18), fill rgba(255,255,255,0.92),
+              0.5pt stroke rgba(0,0,0,0.10), shadow 0/1 + 0/8(-8) 0.04/0.08
+- Inner padding: 16 top + sides, 12 bottom
+- TextEditor: min height 56, font system 15, placeholder rgba(0,0,0,0.4) "Assign a task…"
+- Bottom row: HStack(spacing: 6) of:
+   [+ circle 30, stroke 0.5]
+   [ToolChipGroup capsule height 30, 3 colored 22-circle dots overlapped + "+N" text]
+   [display circle 30]
+   Spacer
+   [livephoto circle 30]
+   [mic.fill circle 30]
+   [SendButton 30 circle, bg black.opacity(0.08), arrow.up.circle.fill]
+```
+
+`SendButton` enables only when text is non-empty; while sending, replace symbol with
+`ProgressView().controlSize(.small)`.
+
+#### Suggestion chips
+
+`FlowLayout` (or a manual wrap) of 32-pt pill buttons. Each: 14-pt horizontal padding, 7-pt gap,
+0.5-pt stroke `rgba(0,0,0,0.10)`, label SF Pro Medium 12.5.
+
+#### Active-thread state
+
+When `thread.messages.isEmpty == false`:
+- Replace the empty-state stack with a `ScrollViewReader` of bubble rows.
+- Composer becomes `.safeAreaInset(edge: .bottom)` so it pins to the bottom and shrinks the scroll
+  region.
+- The serif hero collapses to a 13-pt secondary string in the page subtitle ("3 turns · investor
+  sync"). The hero font is **not** used outside the empty state.
+
+#### Tool calls in bubbles
+
+Render as a collapsed inline strip inside the agent message:
+
+```
+[wrench.and.screwdriver]  toolName  →  resultPreview (truncated 60 chars)
+```
+
+Tap expands a sheet showing full args + result.
+
+### 7.6 Live Signal — `LiveSignalView`
+
+`PageShell(title: "Live Signal", subtitle: "Investor sync · 80 events")` with filter row:
+
+```
+SegmentedPill(All / Signals / Tasks / Artifacts) — Spacer —
+[StatusDot.ok pulsing, "SSE · /events"] — SearchField(180) — refresh
+```
+
+Content:
+- `ForEach(sessions)` grouped by session.
+- Group header: 8-pt row with chevron-down/right, session title, "Active" capsule (if live),
+  spacer, duration mono 11 secondary.
+- Inside each group: single rounded card (radius 10), rows separated by `Divider()`.
+- Event row layout (12-pt outer vertical padding, 16-pt horizontal):
+  - 70-pt mono timestamp column
+  - 22 × 22 typed glyph in tinted square
+  - VStack: title (semibold 13), body (12.5 regular 0.7 opacity), mono meta (11 0.45 opacity)
+
+Event types and accent tints:
+
+| Type | SF Symbol | Tint | Source event |
+| --- | --- | --- | --- |
+| `task` | `target` | blue | `active_task_generated` |
+| `artifact` | `doc.text.fill` | green | `artifact_ready` |
+| `asr` | `mic.fill` | green | `transcript_finalized` |
+| `sop` | `pin.fill` | orange | `sop_capture_started/closed` |
+| `session` | `record.circle` | red | `session_started/stopped` |
+
+### 7.7 Active Task — `ActiveTaskView`
+
+`PageShell(title: "Active Task")` with filter row:
+
+```
+SegmentedPill(Awaiting [n] / Completed / Ignored) — Spacer —
+[Ignore button .neutral] [Insert draft button .preferred, icon arrow.right.to.line]
+```
+
+Content, max-width 820, centered:
+
+1. **Hero**: blue "Awaiting review" capsule (caption.bold, 2/9 padding), then `display.xl` title,
+   then 15-pt secondary body (max-width 620).
+2. **MetadataStrip**: 4 cells — `Surface · Confidence · Source · Insertion`.
+3. **Proposed actions card**: caption.bold "PROPOSED ACTIONS" label, then `RoundedRectangle(10)`
+   card with numbered rows. Each row: 22 × 22 grey tile with number, title (semibold 13), detail
+   (12 secondary), trailing `Ready` green capsule.
+4. **Recent card**: caption.bold "RECENT", then card listing past tasks (target glyph, title, sub,
+   trailing state capsule — `Completed` green or `Ignored` grey).
+
+Empty state: when `state.currentTask` is nil, show centered placeholder with `target` symbol +
+"No task awaiting review." + secondary "Live signal continues in the background." + link button
+"Open Live Signal" → routes to `.liveSignal`.
+
+### 7.8 Sessions — `SessionsView`
+
+`PageShell(title: "Sessions")` with filter row:
+
+```
+SegmentedPill(All / Active / Archived) — Spacer —
+SearchField(200) — refresh
+```
+
+Content: `Table(sessions)` with columns:
+
+| Column | Width | Content |
+| --- | --- | --- |
+| Session | flex | `clock.arrow.circlepath` glyph + title (semibold 13) + mono id (11 secondary) |
+| Started | 110 | "Today 09:42" |
+| Duration | 90 right-aligned mono | `04:12` |
+| Artifacts | 90 right-aligned mono | `4` |
+| State | 110 | Capsule pill — `Active Task` (blue), `Completed` (green), `Ignored` (grey) |
+| Disclosure | 28 | `chevron.right` 11 pt tertiary |
+
+Selected row tints `selection.bg`. Clicking navigates to session detail (placeholder — out of
+scope for this PR).
+
+### 7.9 Skill Library — `SkillView`
+
+`PageShell(title: skill.name, subtitle: "SKILL.md · 3.2 KB")` with filter row:
+
+```
+SegmentedPill(Preview / Source, glyphs: eye / chevron.left.forwardslash.chevron.right)
+[secondary label "Preview · Source"] — Spacer — SearchField — Generate — Run skill .preferred
+```
+
+Content: centered **720-wide column**, scroll vertical, with:
+
+- Header row: 24×24 tinted blue tile + caption.bold "SKILL · Investor follow-up" + amber "MOCK"
+  pill (or green "CORTEX" if non-mock).
+- `display.xxl` title (32 / 36 / -0.025em).
+- 15-pt secondary subtitle (max-width 580).
+- 4-cell inline meta row (Source / Created / Size / Generator) — each cell label-above-value.
+- Markdown body — see below.
+
+#### Markdown rendering
+
+`AttributedString(markdown:)` is **insufficient** for this surface. Use **`swift-markdown-ui`**
+(Package.swift dependency: `MarkdownUI`) and override these block styles:
+
+```swift
+Markdown(markdown)
+    .markdownTextStyle { FontFamily(.system); FontSize(14); ForegroundColor(.primary) }
+    .markdownBlockStyle(\.heading2) { configuration in
+        configuration.label.font(.system(size: 11, weight: .bold)).kerning(0.06 * 11)
+            .textCase(.uppercase).foregroundStyle(.secondary)
+            .padding(.top, 20).padding(.bottom, 8)
+    }
+    .markdownBlockStyle(\.codeBlock) { configuration in
+        ScrollView(.horizontal) { configuration.label.markdownTextStyle { FontFamilyVariant(.monospaced); FontSize(12.5) } }
+            .padding(16).background(.black.opacity(0.04), in: RoundedRectangle(cornerRadius: 10))
+    }
+    .markdownBlockStyle(\.blockquote) { …amber callout box… }
+```
+
+The amber callout is rendered via a custom code-fence directive (e.g. lines starting with
+`> [!callout]` or a custom inline component) — **not** native markdown blockquote. The mock uses
+a hand-styled `<div>` so a hand-rolled directive is fine.
+
+### 7.10 Settings — `SettingsView`
+
+`PageShell(title: "Settings", subtitle: "Developer console")` with filter row:
+
+```
+SegmentedPill(General / Services / Recording / Permissions / About) — Spacer —
+refresh
+```
+
+Content: centered 760-wide column. Vertical stack of `FormSection`s (16-pt gap):
+
+1. **Orchestrator** — Base URL field, Status row (dot + text), Auto-launch toggle.
+2. **Services** — One 52-pt row per adapter: `StatusDot`, mono name, secondary detail, version,
+   chevron.
+3. **OpenChronicle** — Daemon (Start/Pause/Stop buttons row), Capture (Capture once / Timeline
+   tick), Captures index (Rebuild).
+4. **Permissions** — Mic / Screen Recording / Accessibility. Each is a 52-pt row with leading
+   28-pt tinted icon tile, label, subtitle, trailing `Granted` (green) or `Not granted` (amber)
+   capsule, then a "Manage" / "Open Settings" `.neutral` push button.
+5. **About** — Build string + Export diagnostics button.
+
+`FormSection` implementation:
+```swift
+struct FormSection<Content: View>: View {
+    let title: String
+    let footnote: String?
+    @ViewBuilder var content: () -> Content
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title.uppercased()).font(.system(size: 11, weight: .semibold))
+                .tracking(0.04 * 11).foregroundStyle(.secondary)
+                .padding(.bottom, 6).padding(.horizontal, 4)
+            VStack(spacing: 0) { content() }
+                .background(.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(.black.opacity(0.08), lineWidth: 0.5))
+            if let f = footnote {
+                Text(f).font(.system(size: 11)).foregroundStyle(.secondary)
+                    .padding(.top, 6).padding(.horizontal, 6)
+            }
+        }.padding(.bottom, 22)
+    }
+}
+```
+
+Each form row is 44 pt min height with `Divider()` between (except last). Always use the
+`FormRow` view defined in §6.5-style with `(label, sub?, control)`.
+
+`Open Settings` permission button must call:
+```swift
+NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security")!)
+```
+
+---
+
+## 8. State & data flow
 
 ```swift
 @MainActor final class AppState: ObservableObject {
-    @Published var snapshot: StateSnapshot           // mirrors GET /state
-    @Published var events:   [SignalEvent] = []      // SSE
+    @Published var snapshot: StateSnapshot = .placeholder
+    @Published var events:   [SignalEvent] = []
     @Published var skills:   [Skill] = []
     @Published var sessions: [Session] = []
-    var orchestratorClient: OrchestratorClient
+    @Published var connectivity: Connectivity = .connecting
+
+    let orchestrator: OrchestratorClient
+
+    init() {
+        self.orchestrator = OrchestratorClient()
+        Task { await bootstrap() }
+    }
+
+    private func bootstrap() async {
+        await orchestrator.healthcheck()
+        async let s = orchestrator.get("/state")
+        async let e = orchestrator.get("/events/history?limit=80")
+        async let sk = orchestrator.get("/skills")
+        async let ss = orchestrator.get("/sessions")
+        // … assign with `await`
+        Task { for try await event in orchestrator.eventStream("/events") {
+            await MainActor.run { events.insert(event, at: 0); apply(event) }
+        }}
+    }
 }
 ```
 
-- Inject via `.environmentObject(appState)` at `@main`.
-- `OrchestratorClient` owns the SSE connection (`URLSession.bytes(for:)`) and parses
-  `event:` / `data:` lines, posting decoded `SignalEvent`s on the main actor.
-- Reconnect with exponential backoff if the SSE drops; the UI shows a `StatusDot(.warn)` and
-  the sidebar footer flips its dot to amber.
+- Inject via `.environmentObject(state)` at `@main`.
+- SSE: `URLSession.bytes(for:)` against `/events`. Parse `event:` / `data:` lines.
+- Reconnect with exponential backoff (1s, 2s, 4s, … max 30s) on drop. While reconnecting:
+  `connectivity = .reconnecting` — sidebar footer dot flips to amber.
 
-### 7.2 Derived selection
+### 8.1 Snapshot shape (mirrors PRD §6 `/state`)
 
 ```swift
-enum DashboardRoute: Hashable {
-    case liveSignal, activeTask, sessions, skill(UUID), settings
+struct StateSnapshot: Codable {
+    var jarvisState: JarvisState           // idle, meetingActive, sopMarking, sopGenerating, activeTaskCandidate, taskReviewing
+    var statusMessage: String
+    var currentSession: SessionRef?
+    var sopCapture: SopCaptureRef?
+    var currentTask: ActiveTask?
+    var services: ServicesSnapshot         // openchronicle, ownscribe, cuaDriver, vlmac (each: state + detail + version)
 }
 ```
-
-`@State var route: DashboardRoute = .liveSignal` (or `.activeTask` if a task is awaiting review at
-launch). Persist last route in `@SceneStorage("hippo.dashboard.route")`.
-
-### 7.3 Menu-bar popover routing
-
-`MenuBarExtraView` decides which popover body to render:
-
-```swift
-if let task = appState.snapshot.currentTask, task.state == .awaitingReview {
-    ReviewPopover(task: task)
-} else {
-    StatusPopover()
-}
-```
-
-This is point 5 of the design brief: when an Active Task is generated, the popover content changes
-on its next open. If the popover is already open, the swap animates with `.transition(.opacity)`.
 
 ---
 
-## 8. Orchestrator integration
-
-All HTTP/SSE endpoints are documented in the PRD section 6. The UI only needs to:
+## 9. Orchestrator integration
 
 | UI action | HTTP call |
 | --- | --- |
-| Header "Jarvis ON" | `POST /session/jarvis-on` |
-| Header "Jarvis OFF" / "Stop Jarvis" | `POST /session/jarvis-off` |
+| Popover "Jarvis ON" | `POST /session/jarvis-on` |
+| Popover "Jarvis OFF" / "Stop Jarvis" | `POST /session/jarvis-off` |
 | Popover "Capture" → "Finish Capture" | `POST /sop/capture-start` then `…/capture-finish` |
 | Review popover "Insert draft" | `POST /active-task/{id}/confirm` |
-| Review popover "Ignore" | `POST /active-task/{id}/ignore` |
-| Active Task tab "Completed" press | `POST /active-task/{id}/complete` |
+| Review popover / Active Task "Ignore" | `POST /active-task/{id}/ignore` |
+| Active Task tab "Complete" | `POST /active-task/{id}/complete` |
 | Skill `Generate` | `POST /skill/generate` |
 | Skill row delete | `DELETE /skill/{id}` |
 | Settings · OpenChronicle buttons | `POST /integrations/openchronicle/{verb}` |
+| Sessions list (load) | `GET /sessions` |
+| Skill list (load) | `GET /skills` |
+| Live Signal initial load | `GET /events/history?limit=80` |
+| Live Signal stream | `GET /events` (SSE) |
 
-Each call must show an in-flight state on its trigger (button loading) and surface a `detail`
-string in an Alert if the response is non-2xx — match the PRD's "service detail" semantics.
-
----
-
-## 9. Light / dark mode
-
-The Figma kit ships both. SwiftUI handles this automatically as long as you:
-
-- Use `.foregroundStyle(.primary / .secondary / .tertiary)` instead of hardcoded blacks.
-- Use system materials (`.regularMaterial`, etc.) — they swap fills.
-- Use `Color.accentColor`, `.red`, `.green`, `.orange` semantically.
-- For the few hand-mixed tints (e.g. `rgba(0,0,0,0.11)` selection bg), wrap them in a dynamic
-  color:
-
-```swift
-extension Color {
-    static let sidebarSelected = Color(nsColor: NSColor(name: nil) { appearance in
-        appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            ? NSColor(white: 1, alpha: 0.14)
-            : NSColor(white: 0, alpha: 0.11)
-    })
-}
-```
+Each call sets the trigger button's `isLoading = true`; on a non-2xx response, surface the
+response's `detail` string in `.alert("…", isPresented:)`. Match PRD service-detail semantics.
 
 ---
 
-## 10. Accessibility
+## 10. Light / dark mode & accessibility
 
-- Every popover row, sidebar item, toolbar button needs an `.accessibilityLabel`.
-- Recording status dot: `accessibilityValue("Recording, four minutes twelve seconds")`.
-- Dashboard navigation must respect Voice Control selectors — use plain text labels, not symbols
-  only.
-- Honor `@Environment(\.legibilityWeight)` and `\.sizeCategory`. The 13 pt floor in this spec
-  scales — don't pin to absolute points.
-- Animations gated on `@Environment(\.accessibilityReduceMotion)` — disable pulse and waveform.
+- **Color**: Always use `.foregroundStyle(.primary/.secondary/.tertiary)`, `Color.accentColor`,
+  `Color.red/.green/.orange`. Where a hand-mixed tint is unavoidable (e.g. `selection.bg`), wrap
+  in a dynamic `Color(nsColor: NSColor(name: …) { appearance in … })`.
+- **Material**: `NavigationSplitView` swaps materials per appearance. Don't override.
+- **Voice Over**: every push button, sidebar row, and table row needs an explicit
+  `.accessibilityLabel(...)` and (for status dots / pulsing icons)
+  `.accessibilityValue("Recording, four minutes twelve seconds")`.
+- **Reduce Motion**: pulse animations on `StatusDot` / `Waveform` / segmented selection must check
+  `@Environment(\.accessibilityReduceMotion)` and disable. Sample shown in §6.4 / §6.8.
+- **Dynamic Type**: 13 pt body scales — don't lock with `.fixedSize(horizontal: false, vertical: true)`
+  unless the layout truly cannot accommodate growth.
 
 ---
 
-## 11. Iconography
+## 11. Iconography — SF Symbols only
 
-Use **SF Symbols 6** as the *only* icon library. It ships with Xcode, scales with Dynamic Type,
-inherits the user's accent, animates via `.symbolEffect(...)`, and has matching glyphs for every
-icon used in the mock. Render with `Image(systemName: "...")` — never as PNGs or hand-drawn SVGs.
-
-Download the **SF Symbols app** from Apple to browse glyphs and copy names; the public catalogue
-also lives at `developer.apple.com/sf-symbols`.
-
-**Only one custom symbol**: the Hippo head (`HippoGlyph`). Ship it as a `Custom.symbolset` inside
-`Assets.xcassets` so it tints and scales like a stock symbol. Use it for:
-- The menu-bar extra icon (16 pt).
-- The 28 pt rounded gradient tile in the Status / Review popovers.
-- The 22 pt rounded tile in the dashboard sidebar identity row.
-
-Do **not** reach for third-party icon packs (Lucide, Phosphor, Tabler, etc.). They are great
-products but pull a 200–800 KB asset bundle, fight VoiceOver, and don't get free dark-mode /
-hierarchical-color treatment. SF Symbols covers every glyph the design uses.
+The mock uses SF Symbols' private-use codepoints (e.g. `􀋃`) so the browser can render them
+via the system SF Pro font. **Never copy a PUA codepoint into Swift code.** Use the named symbol
+in the tables below.
 
 ### 11.1 Glyph mapping
 
-The HTML mock uses SF Symbols' PUA codepoints directly. When you port to Swift, replace each
-with `Image(systemName: "<name>")`.
-
-#### Menu bar
-
+#### Menu bar / popovers
 | Where | SF Symbols name | Notes |
 | --- | --- | --- |
 | Menu-bar extra (Hippo) | custom: `HippoGlyph` | + overlaid red `circle.fill` when recording |
-| Battery | `battery.100` | use percentage variants per state |
-| Wi-Fi | `wifi` | use `wifi.slash` if offline |
-| Spotlight | `magnifyingglass` |  |
-| Control Center | `switch.2` |  |
+| Battery / Wi-Fi / Spotlight / Control Center | system menu extras (don't draw) | macOS handles |
+| Status popover header more | `ellipsis.circle` |  |
+| Stop Jarvis | `stop.fill` |  |
+| Capture | `pin.fill` |  |
+| Service: OpenChronicle | `clock.arrow.circlepath` |  |
+| Service: ownscribe | `mic.fill` |  |
+| Service: cua-driver | `cursorarrow.click.2` |  |
+| Service: vlmac | `eye.fill` |  |
+| Popover footer · Activity | `waveform.path.ecg` |  |
+| Popover footer · Library | `sparkles` |  |
+| Popover footer · Settings | `gearshape` |  |
+| Popover footer · Refresh | `arrow.clockwise` |  |
+| Review · Active Task pill | `target` |  |
+| Review · Insert draft button | `arrow.right.to.line` |  |
+| Review · Open in Activity link | `arrow.up.right` |  |
 
-#### Status popover (idle / recording)
-
-| Where | SF Symbols name |
-| --- | --- |
-| Header more menu | `ellipsis.circle` |
-| Stop Jarvis button | `stop.fill` |
-| Capture button | `pin.fill` |
-| OpenChronicle row | `clock.arrow.circlepath` |
-| ownscribe row | `mic.fill` |
-| cua-driver row | `cursorarrow.click.2` |
-| vlmac row | `eye.fill` |
-| Footer · Activity | `waveform.path.ecg` |
-| Footer · Library | `sparkles` |
-| Footer · Settings | `gearshape` |
-| Footer · Refresh | `arrow.clockwise` |
-
-#### Review popover
-
-| Where | SF Symbols name |
-| --- | --- |
-| Active Task pill | `target` |
-| Insert draft button | `arrow.right.to.line` |
-| Ignore | (text only) |
-| Open in Activity link | `arrow.up.right` |
-
-#### Dashboard sidebar
-
+#### Sidebar / dashboard
 | Item | SF Symbols name |
 | --- | --- |
 | Chat | `bubble.left.and.bubble.right.fill` |
 | Live Signal | `waveform.path.ecg` |
 | Active Task | `target` |
 | Sessions | `clock.arrow.circlepath` |
-| Library section `+` | `plus` |
+| Library section `+` button | `plus` |
 | Skill row | `sparkles` |
-| Settings (footer) | `gearshape` |
+| Settings footer button | `gearshape` |
+| Sidebar toggle (custom) | `sidebar.left` |
 
-#### Toolbar (per page)
-
+#### Toolbar (every page filter row)
 | Where | SF Symbols name |
 | --- | --- |
 | Search field icon | `magnifyingglass` |
 | Generic refresh | `arrow.clockwise` |
-| Insert (preferred button) | `arrow.right.to.line` |
+| Insert (preferred) | `arrow.right.to.line` |
 | Play / Run | `play.fill` |
 | Generate | `sparkles` |
 | Segmented · Preview | `eye` |
 | Segmented · Source | `chevron.left.forwardslash.chevron.right` |
-| Disclosure right | `chevron.right` |
-| Disclosure down | `chevron.down` |
+| Disclosure right / down | `chevron.right` / `chevron.down` |
 
-#### Chat page
-
+#### Chat composer
 | Where | SF Symbols name |
 | --- | --- |
-| Model picker (Hippo Mini) | `cpu` (or `apple.intelligence` if available) |
-| Session pill dot | `circle.fill` (red) |
-| Compose new chat (toolbar) | `square.and.pencil` |
-| Composer `+` (more) | `plus.circle` |
-| Composer screen-capture | `display` |
-| Composer mic | `mic.fill` |
-| Composer live audio | `livephoto` |
-| Composer send | `arrow.up.circle.fill` |
+| Model picker leading | `cpu` |
+| Compose new chat | `square.and.pencil` |
+| Composer `+` | `plus.circle` |
+| Screen-capture | `display` |
+| Mic | `mic.fill` |
+| Live audio | `livephoto` |
+| Send | `arrow.up.circle.fill` |
 | Tool dot · Mail | `envelope.fill` |
 | Tool dot · Calendar | `calendar` |
 | Tool dot · GitHub | `chevron.left.forwardslash.chevron.right` |
@@ -639,44 +1177,27 @@ with `Image(systemName: "<name>")`.
 | Suggestion · Start capture | `mic.fill` |
 | Suggestion · More | `ellipsis` |
 
-#### Live Signal events
-
-| Event type | SF Symbols name | Tint |
-| --- | --- | --- |
-| `task` | `target` | blue |
-| `artifact` | `doc.text.fill` | green |
-| `asr` | `mic.fill` | green |
-| `sop` | `pin.fill` | amber |
-| `session` | `record.circle` | red |
-
-#### Settings · Permissions
-
-| Permission | SF Symbols name |
-| --- | --- |
-| Microphone | `mic.fill` |
-| Screen Recording | `eye.fill` |
-| Accessibility | `figure.wave` (or `hand.raised.fill`) |
+#### Live Signal · Settings
+See §7.6 and §7.10 tables.
 
 ### 11.2 Symbol styling
 
-- Sidebar rows use `.regular` weight at 13 pt. Selected items get `.foregroundStyle(.tint)`.
-- Toolbar symbols use `.medium` weight at 14 pt.
-- Tool dots (Chat composer) use `.bold` at 10 pt over a colored background — set
-  `.foregroundStyle(.white)`.
-- For the recording state, attach `.symbolEffect(.pulse)` to the red dot; gate via
-  `.symbolEffectsRemoved()` when `\\.accessibilityReduceMotion` is on.
+- Sidebar rows: `.font(.system(size: 13, weight: .regular))` — system tints when selected.
+- Toolbar filter row: `.font(.system(size: 14, weight: .medium))`.
+- Composer tool dots: 22 pt circle bg; 10-pt `bold` white-foreground symbol.
+- Recording dot: `.symbolEffect(.pulse, isActive: !reduceMotion)`.
 
 ---
 
 ## 12. Build / package
 
 - Xcode 17, macOS 26 SDK.
-- Bundle id `com.hippo.jarvis`. Entitlements: Hardened Runtime, Microphone, Screen Recording,
-  Apple Events (to AppKit; no Mail.app scripting yet).
+- Bundle id `com.hippo.jarvis`. Entitlements: Hardened Runtime, Microphone, Screen Recording.
+- Single dependency: `swift-markdown-ui` (for Skill view). Everything else is system.
 - The Swift app launches the FastAPI Orchestrator with `Process` if it isn't reachable — see PRD
-  section 4.1. Log path: `.runtime/orchestrator-app.log`.
-- Ship a single `Custom.symbolset` in `Assets.xcassets` for the Hippo head. Nothing else needs to
-  be bundled — every other icon is sourced from SF Symbols at runtime.
+  §4.1. Log path: `.runtime/orchestrator-app.log`.
+- Ship one `Custom.symbolset` in `Assets.xcassets` for the Hippo head (§6.9). No other asset
+  bundles.
 
 ---
 
@@ -685,49 +1206,54 @@ with `Image(systemName: "<name>")`.
 A PR delivering this spec passes if all of the following hold:
 
 - [ ] Menu bar shows the Hippo glyph + red pulsing dot when recording; **no rectangle pill**.
-- [ ] Status popover dismisses on outside-click, opens instantly, width 320, no arrow notch.
-- [ ] When an Active Task moves to `awaiting_review`, the popover body swaps to the Review variant on next open with an opacity crossfade.
-- [ ] Dashboard sidebar selection is one of: Chat, Live Signal, Active Task, Sessions, a specific Skill, or Settings — and each detail view loads in <100 ms from in-memory state.
-- [ ] Sidebar **fully collapses** (`NavigationSplitViewVisibility.detailOnly`); when collapsed the **same `sidebar.left` toggle** appears in the detail pane's title row to re-expand. No compose / pencil button next to the toggle in either state.
-- [ ] Every detail view (Chat, Live Signal, Active Task, Sessions, Skill, Settings) renders cleanly in both expanded and collapsed states without page-level changes — collapse is handled entirely by `PageShell`.
-- [ ] The Chat page renders the empty state (serif hero + composer + suggestions + recent threads) when the thread is empty, and switches to a bubble list with a pinned composer when messages exist.
-- [ ] The serif `New York` font is used **only** for the Chat hero — every other label, title and body uses SF Pro.
-- [ ] All hairlines are 0.5 pt (use `.frame(height: 0.5)` Rectangle, not `Divider()` which is 1 pt on macOS pre-26 — verify on the target OS).
-- [ ] Dark mode renders without any hand-mixed gray ever being visible against a dark background.
-- [ ] Every icon is an `Image(systemName:)` call (or the single custom Hippo symbol) — no PNG or SVG fallbacks in the binary.
-- [ ] VoiceOver reads every row and every push button.
-- [ ] Reducing motion disables the recording dot pulse and the waveform animation.
+- [ ] Status popover dismisses on outside-click, opens instantly, width 320, no arrow notch, sections separated by 0.5-pt `Divider()`s.
+- [ ] When `currentTask.state == .awaitingReview`, the popover body swaps to the Review variant on next open with an opacity crossfade.
+- [ ] **No fake traffic lights drawn inside the sidebar or detail pane.** macOS's window chrome is the only source.
+- [ ] **No `.toolbar { … }` is used for the 44-pt filter row at the top of any page.** Each page builds it as a manual `HStack` inside `PageShell`.
+- [ ] Sidebar toggle: the system one is removed via `.toolbar(removing: .sidebarToggle)`; a single custom `sidebar.left` toggle lives in `ToolbarItem(.navigation)`. Never two.
+- [ ] Sidebar fully collapses (`NavigationSplitViewVisibility.detailOnly`); the same `sidebar.left` icon flips the visibility either way.
+- [ ] All six routes (`chat`, `liveSignal`, `activeTask`, `sessions`, `.skill`, `settings`) render cleanly in both expanded and collapsed states with no per-page collapse code.
+- [ ] Page titles appear in the **window titlebar** via `.navigationTitle()` / `.navigationSubtitle()` — not as a duplicated 32-pt strip inside the content.
+- [ ] Chat hero "What should Hippo do?" is the **only** New York serif text. Everything else is SF Pro.
+- [ ] Skill view renders the amber callout block and the monospace `<pre>` block correctly — not as default `AttributedString` markdown.
+- [ ] `Toggle` in Settings is 36 × 22 (custom) or `.controlSize(.mini)` — never the default 50 × 31.
+- [ ] In-pane segmented controls use the custom `SegmentedPill` (§6.2) — **not** `.pickerStyle(.segmented)`.
+- [ ] Vertical hairlines are `Rectangle().frame(width: 0.5)` — never `Divider()` inside an `HStack`.
+- [ ] Dark mode renders without any hand-mixed black-on-grey survivors. Run every artboard in dark mode and screenshot-diff.
+- [ ] Every icon is `Image(systemName: …)` or the single `HippoGlyph` custom symbol — no PNG / SVG fallbacks.
+- [ ] VoiceOver reads every push button, sidebar row, table row, and status dot.
+- [ ] Reduce Motion disables `StatusDot` pulse and `Waveform` animation.
 
 ---
 
-## 14. Out of scope (documented in PRD §10/12)
+## 14. Out of scope (per PRD §10 / §12)
 
 - Independent floating intervention HUD outside the popover.
 - Real `cua-driver` insertion into Mail / Messages / browser forms.
 - `vlmac` video preview, `basic-memory` persistence, multi-user cloud sync.
 - `Project_Cortex` real backend invocation (gated behind env vars).
 
-These should compile to placeholder views that surface their service status only; they are not part of the visual scope of this design.
+Placeholder views that surface service status only — they are not visual scope.
 
 ---
 
 ## 15. Delivered artboards (HTML mock)
 
-The HTML mock in `Hippo Demo.html` is the visual ground truth. Each artboard maps to a SwiftUI scene/view:
+The HTML mock in `Hippo Demo.html` is the visual ground truth. Each artboard maps to a SwiftUI
+scene/view as below. **Where the mock and this document disagree on a SwiftUI API or measurement,
+this document wins** — the mock is a browser approximation.
 
 | Artboard id | Surface | SwiftUI |
 | --- | --- | --- |
-| `menubar-popover` | Menu bar + idle / recording popover | `MenuBarExtra(...) { StatusPopover() }` |
+| `menubar-popover` | Menu bar + idle / recording popover | `MenuBarExtra { StatusPopover() }` |
 | `review-popover` | Menu bar + task-review popover | same `MenuBarExtra`, body = `ReviewPopover` |
-| `dash-chat` | Dashboard · Chat | `DashboardWindow(route: .chat)` |
-| `dash-live` | Dashboard · Live Signal | `.liveSignal` |
-| `dash-task` | Dashboard · Active Task | `.activeTask` |
-| `dash-sessions` | Dashboard · Sessions | `.sessions` |
-| `dash-skills` | Dashboard · Skill Library | `.skill("investor-followup")` |
-| `dash-settings` | Dashboard · Settings | `.settings` |
-| `dash-chat-col` | Same as `dash-chat`, sidebar collapsed | `NavigationSplitViewVisibility.detailOnly` |
-| `dash-task-col` | Same as `dash-task`, sidebar collapsed | ” |
-| `dash-skills-col` | Same as `dash-skills`, sidebar collapsed | ” |
-| `dash-sessions-col` | Same as `dash-sessions`, sidebar collapsed | ” |
+| `dash-chat` | Dashboard · Chat | `route = .chat` |
+| `dash-live` | Dashboard · Live Signal | `route = .liveSignal` |
+| `dash-task` | Dashboard · Active Task | `route = .activeTask` |
+| `dash-sessions` | Dashboard · Sessions | `route = .sessions` |
+| `dash-skills` | Dashboard · Skill Library | `route = .skill(<investor-followup>)` |
+| `dash-settings` | Dashboard · Settings | `route = .settings` |
+| `dash-chat-col` / `dash-task-col` / `dash-skills-col` / `dash-sessions-col` | Same, sidebar collapsed | `visibility = .detailOnly` |
 
-Collapsed variants for Live Signal and Settings are not shipped as separate artboards — they are visually identical to the other collapsed views (sidebar removed, toggle prepended to the page title) and need no extra spec.
+Collapsed variants for Live Signal and Settings are not shipped as separate artboards — they
+are produced automatically by `PageShell` honoring the collapsed environment.

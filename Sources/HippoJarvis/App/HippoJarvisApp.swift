@@ -2,7 +2,7 @@ import SwiftUI
 
 @main
 struct HippoJarvisApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @StateObject private var store = AppStateStore()
 
     var body: some Scene {
@@ -42,7 +42,7 @@ struct HippoJarvisApp: App {
 private struct HippoMenuBarIcon: View {
     private static let image: NSImage = {
         if let url = Bundle.main.url(forResource: "HippoJarvisIcon", withExtension: "png"),
-            let image = NSImage(contentsOf: url) {
+           let image = NSImage(contentsOf: url) {
             image.isTemplate = true
             image.size = NSSize(width: 22, height: 22)
             return image

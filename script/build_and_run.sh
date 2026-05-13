@@ -31,7 +31,7 @@ verify_launch() {
   done
   pgrep -x "$APP_NAME" >/dev/null
 
-  for _ in {1..100}; do
+  for _ in {1..480}; do
     if curl -fsS http://127.0.0.1:8787/health >/dev/null 2>&1; then
       sleep 2
       pgrep -x "$APP_NAME" >/dev/null
@@ -51,17 +51,10 @@ case "$MODE" in
       echo "$APP_BINARY does not exist; run $0 --verify once to build the app bundle" >&2
       exit 2
     fi
-    "$ROOT_DIR/script/bootstrap_runtimes.sh" --check
     /usr/bin/open -n "$APP_BUNDLE"
     verify_launch
     ;;
-  --bootstrap-runtime|bootstrap-runtime)
-    "$ROOT_DIR/script/bootstrap_runtimes.sh"
-    exit 0
-    ;;
 esac
-
-"$ROOT_DIR/script/bootstrap_runtimes.sh"
 
 swift build --product "$APP_NAME"
 BUILD_DIR="$(swift build --show-bin-path)"
