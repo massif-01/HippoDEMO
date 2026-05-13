@@ -342,3 +342,445 @@ struct RecordingAudioFile: Codable, Equatable, Sendable {
     var durationSeconds: Double?
     var dataFormat: String?
 }
+
+struct AiManusConfig: Codable, Equatable, Sendable {
+    var enabled: Bool?
+    var status: String?
+    var model: String?
+    var provider: String?
+    var baseUrl: String?
+    var frontendUrl: String?
+    var apiBaseUrl: String?
+    var authProvider: String?
+    var apiKeyConfigured: Bool?
+    var tokenConfigured: Bool?
+    var timeoutSeconds: Double?
+    var apiBase: String?
+    var modelName: String?
+    var temperature: Double?
+    var maxTokens: Int?
+    var extraHeaders: String?
+    var extraHeadersConfigured: Bool?
+    var envPath: String?
+    var envExists: Bool?
+    var envSource: String?
+    var restartRequired: Bool?
+    var clawEnabled: Bool?
+    var detail: String?
+
+    static let empty = AiManusConfig(
+        enabled: false,
+        status: "unavailable",
+        model: nil,
+        provider: nil,
+        baseUrl: nil,
+        frontendUrl: nil,
+        apiBaseUrl: nil,
+        authProvider: nil,
+        apiKeyConfigured: false,
+        tokenConfigured: false,
+        timeoutSeconds: nil,
+        apiBase: nil,
+        modelName: nil,
+        temperature: nil,
+        maxTokens: nil,
+        extraHeaders: nil,
+        extraHeadersConfigured: nil,
+        envPath: nil,
+        envExists: nil,
+        envSource: nil,
+        restartRequired: nil,
+        clawEnabled: nil,
+        detail: nil
+    )
+}
+
+struct AiManusConfigUpdateRequest: Codable, Sendable {
+    var baseUrl: String?
+    var frontendUrl: String?
+    var authProvider: String?
+    var apiKey: String?
+    var timeoutSeconds: Double?
+    var apiBase: String?
+    var modelName: String?
+    var temperature: Double?
+    var maxTokens: Int?
+    var extraHeaders: String?
+}
+
+struct AiManusRuntimeCommandRequest: Codable, Sendable {
+    var build: Bool?
+}
+
+struct AiManusRuntimeCommandResponse: Codable, Sendable {
+    var action: String?
+    var status: String?
+    var detail: String?
+    var pid: Int?
+    var command: [String]?
+    var cwd: String?
+    var logPath: String?
+    var service: ServiceStatus?
+}
+
+struct AiManusRuntimeLogsResponse: Codable, Equatable, Sendable {
+    var logPath: String?
+    var lines: [String]
+    var detail: String?
+
+    static let empty = AiManusRuntimeLogsResponse(logPath: nil, lines: [], detail: nil)
+}
+
+struct AiManusStatus: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var status: String
+    var detail: String?
+    var config: AiManusConfig?
+
+    static let empty = AiManusStatus(ok: false, status: "unknown", detail: nil, config: nil)
+}
+
+struct ManusThread: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var sessionId: String
+    var manusSessionId: String?
+    var title: String?
+    var status: String
+    var latestMessage: String?
+    var latestMessageAt: Int?
+    var unreadMessageCount: Int?
+    var isShared: Bool?
+    var createdAt: String?
+    var updatedAt: String?
+
+    init(
+        id: String? = nil,
+        sessionId: String,
+        manusSessionId: String? = nil,
+        title: String?,
+        status: String,
+        latestMessage: String?,
+        latestMessageAt: Int?,
+        unreadMessageCount: Int?,
+        isShared: Bool?,
+        createdAt: String? = nil,
+        updatedAt: String? = nil
+    ) {
+        self.id = id ?? sessionId
+        self.sessionId = sessionId
+        self.manusSessionId = manusSessionId
+        self.title = title
+        self.status = status
+        self.latestMessage = latestMessage
+        self.latestMessageAt = latestMessageAt
+        self.unreadMessageCount = unreadMessageCount
+        self.isShared = isShared
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case sessionId
+        case manusSessionId
+        case title
+        case status
+        case latestMessage
+        case latestMessageAt
+        case unreadMessageCount
+        case isShared
+        case createdAt
+        case updatedAt
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let sessionId = try container.decode(String.self, forKey: .sessionId)
+        self.init(
+            id: try container.decodeIfPresent(String.self, forKey: .id),
+            sessionId: sessionId,
+            manusSessionId: try container.decodeIfPresent(String.self, forKey: .manusSessionId),
+            title: try container.decodeIfPresent(String.self, forKey: .title),
+            status: try container.decodeIfPresent(String.self, forKey: .status) ?? "unknown",
+            latestMessage: try container.decodeIfPresent(String.self, forKey: .latestMessage),
+            latestMessageAt: try container.decodeIfPresent(Int.self, forKey: .latestMessageAt),
+            unreadMessageCount: try container.decodeIfPresent(Int.self, forKey: .unreadMessageCount),
+            isShared: try container.decodeIfPresent(Bool.self, forKey: .isShared),
+            createdAt: try container.decodeIfPresent(String.self, forKey: .createdAt),
+            updatedAt: try container.decodeIfPresent(String.self, forKey: .updatedAt)
+        )
+    }
+}
+
+struct ManusThreadsResponse: Codable, Equatable, Sendable {
+    var sessions: [ManusThread]
+
+    static let empty = ManusThreadsResponse(sessions: [])
+}
+
+struct ManusSessionResponse: Codable, Equatable, Sendable {
+    var sessionId: String
+    var manusSessionId: String?
+}
+
+struct ManusThreadDetail: Codable, Equatable, Sendable {
+    var sessionId: String
+    var manusSessionId: String?
+    var title: String?
+    var status: String
+    var messages: [ManusMessage]?
+    var events: [ManusStreamEvent]
+    var isShared: Bool?
+    var remote: ManusRemoteSession?
+    var remoteStatus: String?
+    var remoteDetail: String?
+    var metadata: [String: JSONValue]?
+}
+
+struct ManusRemoteSession: Codable, Equatable, Sendable {
+    var sessionId: String?
+    var title: String?
+    var status: String?
+    var filesCount: Int?
+    var files: [ManusRemoteFile]?
+}
+
+struct ManusRemoteFile: Codable, Equatable, Sendable {
+    var name: String?
+    var path: String?
+    var size: Double?
+}
+
+struct ManusSandboxAccess: Codable, Equatable, Sendable {
+    var sessionId: String?
+    var frontendUrl: String?
+    var backendUrl: String?
+    var websocketUrl: String?
+    var interactiveUrl: String?
+    var takeOverUrl: String?
+    var status: String?
+    var requiresConfirmation: Bool?
+    var expiresAt: String?
+    var detail: String?
+    var metadata: [String: JSONValue]?
+
+    static let empty = ManusSandboxAccess(
+        sessionId: nil,
+        frontendUrl: nil,
+        backendUrl: nil,
+        websocketUrl: nil,
+        interactiveUrl: nil,
+        takeOverUrl: nil,
+        status: nil,
+        requiresConfirmation: true,
+        expiresAt: nil,
+        detail: nil,
+        metadata: nil
+    )
+
+    var interactiveEntryURL: String? {
+        if let takeOverUrl, !takeOverUrl.isEmpty {
+            return takeOverUrl
+        }
+        if let interactiveUrl, !interactiveUrl.isEmpty {
+            return interactiveUrl
+        }
+        return nil
+    }
+}
+
+struct ManusFileInfo: Identifiable, Codable, Equatable, Sendable {
+    var fileId: String?
+    var remoteId: String?
+    var name: String?
+    var filename: String?
+    var path: String?
+    var filePath: String?
+    var size: Double?
+    var sizeBytes: Double?
+    var mimeType: String?
+    var contentType: String?
+    var fileType: String?
+    var type: String?
+    var kind: String?
+    var isDirectory: Bool?
+    var createdAt: String?
+    var updatedAt: String?
+    var modifiedAt: String?
+    var uploadDate: String?
+    var fileUrl: String?
+    var metadata: [String: JSONValue]?
+
+    var id: String {
+        fileIdentifier.isEmpty ? "unknown-file" : fileIdentifier
+    }
+
+    var fileIdentifier: String {
+        fileId ?? remoteId ?? path ?? filePath ?? name ?? filename ?? ""
+    }
+
+    var displayName: String {
+        if let name, !name.isEmpty {
+            return name
+        }
+        if let filename, !filename.isEmpty {
+            return filename
+        }
+        if let path, !path.isEmpty {
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
+        if let filePath, !filePath.isEmpty {
+            return URL(fileURLWithPath: filePath).lastPathComponent
+        }
+        return fileIdentifier.isEmpty ? "Untitled file" : fileIdentifier
+    }
+
+    var effectiveSize: Double? {
+        sizeBytes ?? size
+    }
+
+    var typeLabel: String {
+        if isDirectory == true {
+            return "Folder"
+        }
+        if let fileType, !fileType.isEmpty {
+            return fileType
+        }
+        if let type, !type.isEmpty {
+            return type
+        }
+        if let kind, !kind.isEmpty {
+            return kind
+        }
+        if let mimeType, !mimeType.isEmpty {
+            return mimeType
+        }
+        if let contentType, !contentType.isEmpty {
+            return contentType
+        }
+        return "File"
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case fileId
+        case remoteId = "id"
+        case name
+        case filename
+        case path
+        case filePath
+        case size
+        case sizeBytes
+        case mimeType
+        case contentType
+        case fileType
+        case type
+        case kind
+        case isDirectory
+        case createdAt
+        case updatedAt
+        case modifiedAt
+        case uploadDate
+        case fileUrl
+        case metadata
+    }
+}
+
+struct ManusFilesResponse: Codable, Equatable, Sendable {
+    var sessionId: String?
+    var files: [ManusFileInfo]
+    var count: Int?
+    var status: String?
+    var detail: String?
+
+    static let empty = ManusFilesResponse(sessionId: nil, files: [], count: nil, status: nil, detail: nil)
+}
+
+struct ManusFilePreview: Codable, Equatable, Sendable {
+    var fileId: String?
+    var name: String?
+    var path: String?
+    var mimeType: String?
+    var fileType: String?
+    var content: JSONValue?
+    var text: String?
+    var previewUrl: String?
+    var signedUrl: String?
+    var size: Double?
+    var truncated: Bool?
+    var detail: String?
+
+    var previewText: String? {
+        if let text, !text.isEmpty {
+            return text
+        }
+        if case .string(let value)? = content, !value.isEmpty {
+            return value
+        }
+        return content?.compactDescription
+    }
+
+    var displayName: String {
+        if let name, !name.isEmpty {
+            return name
+        }
+        if let path, !path.isEmpty {
+            return URL(fileURLWithPath: path).lastPathComponent
+        }
+        return fileId ?? "Preview"
+    }
+}
+
+struct ManusFileDownloadLink: Codable, Equatable, Sendable {
+    var fileId: String?
+    var url: String
+    var expiresAt: String?
+    var method: String?
+    var headers: [String: JSONValue]?
+    var detail: String?
+
+    var downloadURL: URL? {
+        URL(string: url)
+    }
+}
+
+struct ManusMessage: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var role: String
+    var content: String
+    var timestamp: Int?
+    var eventId: String?
+    var attachments: [JSONValue]?
+}
+
+struct ManusPlanStep: Identifiable, Codable, Equatable, Sendable {
+    var id: String
+    var description: String
+    var status: String
+    var timestamp: Int?
+    var eventId: String?
+}
+
+struct ManusToolEvent: Identifiable, Codable, Equatable, Sendable {
+    var toolCallId: String
+    var name: String
+    var function: String
+    var status: String
+    var args: [String: JSONValue]
+    var content: JSONValue?
+    var timestamp: Int?
+    var eventId: String?
+
+    var id: String { toolCallId }
+}
+
+struct ManusChatRequest: Codable, Sendable {
+    var message: String?
+    var timestamp: Int?
+    var eventId: String?
+    var attachments: [JSONValue]?
+}
+
+struct ManusStreamEvent: Codable, Equatable, Sendable {
+    var event: String
+    var data: JSONValue?
+}

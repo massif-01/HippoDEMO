@@ -20,6 +20,15 @@ HippoDEMO 已经从“多个既有项目的能力组合设想”推进到一个�
 - ownscribe、vlmac、cua-driver、basic-memory 还没有全部 real adapter 化。
 - UI 已有 Jarvis HUD 方向，但仍可以继续做视觉 polish 和交互细化。
 
+## 2026-05-14 ai-manus Runtime 启动按钮
+
+- 在 Orchestrator 新增 ai-manus runtime 手动控制接口：`/integrations/ai-manus/runtime/start`、`stop`、`restart`、`logs`。
+- Runtime 控制默认调用 `ai-manus/dev.sh up -d`，不会在后台自动启动；只有用户点击按钮才会触发。
+- 首次启动时如果 `ai-manus/.env` 不存在，会从 `.env.example` 创建，并把 `AUTH_PROVIDER` 写成 Hippo 当前配置，默认 `none`，避免本地 Chat 代理被登录鉴权挡住。
+- Runtime 日志写入 `orchestrator/data/ai_manus/runtime.log`，API 响应和 UI 中不回显 API key。
+- Settings 的 `ai-manus Runtime` 控制台新增 `Start ai-manus`、`Restart`、`Stop`、`Logs` 按钮，并展示最近命令、pid、日志路径和尾部日志。
+- 验证：`python -m compileall orchestrator`、`swift build --product HippoJarvis`、`./script/build_and_run.sh --verify` 均通过；本轮没有点击 Start，因此没有启动 ai-manus Docker 栈。
+
 ## 初始项目调研
 
 工作目录下最初有多个独立项目，后来新增了 `cua`。我们先逐个梳理了各项目的前后端能力，并确认哪些能力进入主路径，哪些能力只作为后台设置或调试窗口。
@@ -1175,3 +1184,354 @@ swift build --product HippoJarvis
 
 - 旧记录中“`open -n -g <本地 .build/CuaDriver.app> --args serve` 本轮没有稳定拉起 daemon”的结论已被本节取代；当前 Orchestrator 启动路径已经验证可用。
 - CUA launcher 解决的是 daemon 生命周期管理，不代表微信/邮件等外部可见 surface 已经开放；插入仍受 target surface preflight 和用户确认约束。
+
+## 2026-05-13 CUA Active Task 插入 smoke 与 target surface 锁定
+
+### 调整内容
+
+- 端到端 smoke 暴露出一个真实 race：
+  - Active Task 生成时 TextEdit target surface 已经 safe。
+  - 但用户确认 / 控制台请求可能让当前 active app 瞬间切回 Safari、Codex 或其他应用。
+  - 旧逻辑在 `confirm` 时重新调用 `target_surface()`，因此会把目标错误重算为当前 active app，并被 safety guard 拒绝。
+- 修复方式：
+  - `Active Task` 生成或 `intervention/detect` 时继续把 target surface 写入 `insert_draft` action payload。
+  - `confirm` 调用 `cua_driver_adapter.insert_text()` 时传入这个 locked surface hint。
+  - `insert_text()` 只有在 hint 满足以下条件时才使用：
+    - `safe=true`
+    - bundle id 在低风险 allowlist 中
+    - 不是 blocked target
+    - 有 pid / window_id / element_index
+  - hint 无效时才回退到重新检测当前 active app。
+
+### 验证记录
+
+- `python -m compileall orchestrator` 通过。
+- `swift build --product HippoJarvis` 通过。
+- `./script/build_and_run.sh --verify` 通过。
+- CUA daemon 已 online：
+  - socket: `~/Library/Caches/cua-driver/cua-driver.sock`
+  - pid: `25003`
+- 打开 TextEdit 临时文档：
+  - `/private/tmp/hippo_cua_e2e_smoke.txt`
+- `GET /integrations/cua/target-surface` 返回：
+  - `safe=true`
+  - `mode=textedit`
+  - `bundle_id=com.apple.TextEdit`
+  - `window_title=hippo_cua_e2e_smoke.txt`
+  - `element_role=AXTextArea`
+- `POST /active-task/generate` 生成：
+  - task: `task_9751d802dae5`
+  - insert action status: `target_ready`
+  - `intervention_signal_detected`
+- `POST /active-task/task_9751d802dae5/confirm` 成功：
+  - app state 进入 `task_reviewing`
+  - action status 变为 `inserted`
+  - service detail: `Inserted 495 char(s) into [2] AXTextArea`
+  - event history 记录 `cua_insert_requested`、`cua_insert_completed`、`active_task_confirmed`
+- 通过 cua-driver 向 TextEdit 发送 `Cmd+S` 保存临时文件后，磁盘验证通过：
+  - `/private/tmp/hippo_cua_e2e_smoke.txt` 为 `495` 字节
+  - 文件内容为 follow-up draft 正文。
+
+### 注意
+
+- TextEdit smoke 证明 CUA 最小真实插入链路已经跑通，但仍不代表微信 / 邮件专用 surface 可直接开放。
+- ownscribe 本轮 `Jarvis ON` 仍因 ScreenCaptureKit TCC 被拒绝而进入 fallback，不影响 CUA smoke，但后续真实会议链路需要单独修音频权限。
+
+## 2026-05-13 ownscribe ScreenCaptureKit TCC 复测
+
+### 复测背景
+
+- 用户在 macOS 隐私控制中删除并重新添加了 Jarvis，要求再次测试 ownscribe 系统音频录制。
+- 测试前通过 `./script/build_and_run.sh --verify` 重启了 HippoJarvis。
+
+### 复测结果
+
+- `GET /integrations/ownscribe/preflight?network=false`：
+  - ownscribe helper 可见。
+  - audio devices 可见。
+  - ASR model 已配置。
+  - 唯一非权限红项是 summary model 未配置。
+- `POST /session/jarvis-on` 后 ownscribe 仍失败：
+  - `SCStreamErrorDomain Code=-3801`
+  - `用户拒绝了应用程序、窗口、显示器捕捉的TCC`
+  - output dir: `orchestrator/data/ownscribe/session_5ca9b855821b`
+- 直接运行 Swift helper `ownscribe/bin/ownscribe-audio capture --output /private/tmp/hippo_audio_permission_test.wav --display --silence-timeout 2`：
+  - 没有出现 `SCStreamError -3801`
+  - 生成了 2.1 秒 wav
+  - 但录到静音并输出 `[SILENCE_WARNING]`
+
+### 关键诊断
+
+- 当前 Orchestrator 启动 ownscribe 的录音链路是：
+  - HippoJarvis app -> uvicorn / Python Orchestrator -> Python child -> `ownscribe-audio` Swift helper。
+- 复查当前开发 app bundle 签名后发现：
+  - 旧构建的 `dist/HippoJarvis.app` designated requirement 只有 `cdhash`。
+  - Info.plist 没有被签名绑定，`codesign` 显示 `Info.plist=not bound`。
+  - 每次 `build_and_run.sh --verify` 都会 rebuild 并替换 app bundle，可能让用户刚在隐私控制里添加的授权失效。
+- 已修 `script/build_and_run.sh`：
+  - staging 完 `dist/HippoJarvis.app` 后执行 `codesign --force --sign - --identifier com.hippodemo.HippoJarvis`。
+  - 新签名显示 `Identifier=com.hippodemo.HippoJarvis`，`Info.plist entries=6`。
+  - 但 ad-hoc 签名的 designated requirement 仍包含当前 `cdhash`；开发态下 rebuild 仍可能导致需要重新授权。
+- 新增 `./script/build_and_run.sh --restart-no-build`：
+  - 只重启现有 `dist/HippoJarvis.app`。
+  - 不 rebuild，不改变 cdhash。
+  - 已验证该模式能启动 app 并通过 Orchestrator health check。
+
+### 下一步
+
+- 要继续验证 ScreenCaptureKit 权限，必须先在 macOS 隐私控制中重新添加当前这一版 `dist/HippoJarvis.app`，然后只用 `./script/build_and_run.sh --restart-no-build` 重启测试。
+- 不要在重新授权后再运行 `--verify` 或普通 build，否则会替换 app bundle 并可能让授权再次失效。
+- 更长期的稳定方案是引入真正稳定的开发签名 / 打包签名，或把录音 helper 设计为明确的、可授权的 bundled helper app。
+
+## 2026-05-13 ownscribe TCC 授权后复测通过启动阶段
+
+### 复测方式
+
+- 用户重新在隐私控制中添加当前 `dist/HippoJarvis.app`。
+- 使用 `./script/build_and_run.sh --restart-no-build` 重启，未 rebuild，未改变 cdhash。
+- 复查当前 app designated requirement：
+  - `cdhash H"fd6a9052996715f35e267cdca9de88a7a240bf2e"`
+- 调用：
+  - `POST /session/jarvis-on`
+  - 等待约 56 秒后 `POST /session/jarvis-off`
+
+### 结果
+
+- `Jarvis ON` 成功进入录音：
+  - session: `session_c95cffc63329`
+  - ownscribe status: `recording`
+  - recording pid: `34557`
+  - 不再出现 `SCStreamErrorDomain Code=-3801`
+- `Jarvis OFF` 成功停止并落盘：
+  - `orchestrator/data/ownscribe/session_c95cffc63329/recording.wav`
+  - `recording.asr.wav`
+  - `recording_timeline.json`
+- 时间戳对齐记录存在：
+  - `recording_started_at=2026-05-13T22:31:51.780794+08:00`
+  - `recording_stopped_at=2026-05-13T22:32:47.899286+08:00`
+  - `wall_duration_seconds=56.11849904060364`
+- 音频文件信息：
+  - `recording.wav`: 约 `20M`，`2 ch, 48000 Hz, Float32`，`55.8 sec`
+  - `recording.asr.wav`: `1 ch, 16000 Hz, Int16`，`55.8 sec`
+
+### 剩余问题
+
+- 本轮音频为静音：
+  - stderr: `Audio data received but peak level is near zero (0.0)`
+  - stderr: `Recording appears silent`
+- 因 transcript / summary 缺失，Orchestrator 仍将 stop 阶段 service status 标为 `error`，并回退到 mock meeting artifacts。
+- 这已经不是 TCC 拒绝问题；下一步需要确认测试时是否有系统音频正在播放，或继续排查 ScreenCaptureKit system-audio stream 为什么 peak 为 0。
+
+## 2026-05-13 ownscribe 麦克风录音复测
+
+### 复测方式
+
+- 将 ownscribe 配置切换为电脑麦克风：
+  - `audio_source=mic`
+  - `audio_display=false`
+- 使用 `./script/build_and_run.sh --restart-no-build` 重启当前已授权 app，不 rebuild。
+- `POST /session/jarvis-on` 启动录音：
+  - session: `session_17571006edce`
+  - ownscribe status: `recording`
+  - detail: `audio_source=mic`
+- 录音期间使用 macOS `say` 播放一句测试语音。
+- `POST /session/jarvis-off` 停止录音。
+
+### Jarvis / Orchestrator 路径结果
+
+- 录音文件已生成：
+  - `orchestrator/data/ownscribe/session_17571006edce/recording.wav`
+  - `orchestrator/data/ownscribe/session_17571006edce/recording.asr.wav`
+  - `orchestrator/data/ownscribe/session_17571006edce/recording_timeline.json`
+- 时间戳对齐记录存在：
+  - `recording_started_at=2026-05-13T22:37:39.580748+08:00`
+  - `recording_stopped_at=2026-05-13T22:38:35.999295+08:00`
+  - `wall_duration_seconds=56.418545722961426`
+- 音频文件格式：
+  - `recording.wav`: `1 ch, 48000 Hz, Float32`, `56.3 sec`
+  - `recording.asr.wav`: `1 ch, 16000 Hz, Int16`
+- 但音频内容为全 0：
+  - `peak=0`
+  - `rms=0`
+  - `nonzero=0`
+- 因此 ASR 返回空 / 没有 transcript，Orchestrator 回退到 mock artifacts。
+
+### Direct helper 对照测试
+
+- 直接运行：
+  - `ownscribe/bin/ownscribe-audio capture --output /private/tmp/hippo_mic_direct_test.wav --mic-only --silence-timeout 4`
+  - 期间同样使用 `say` 播放测试语音。
+- direct helper 生成的音频为非零：
+  - `/private/tmp/hippo_mic_direct_test.wav`
+  - `1 ch, 48000 Hz, Float32`
+  - `60.1 sec`
+  - 转换为 i16 后：`peak=32768`、`rms=553.96`、`nonzero=2866331`
+
+### 结论
+
+- 电脑麦克风和 `ownscribe-audio` helper 本身可录到声音。
+- Jarvis / Orchestrator 路径能启动 mic recording 并落盘，但采到的是全 0。
+- 这更像是 HippoJarvis 进程链路的麦克风 TCC 权限 / 责任链问题，而不是 ASR、音频文件写入或硬件问题。
+- 下一步应在 `系统设置 -> 隐私与安全性 -> 麦克风` 中确认当前 `dist/HippoJarvis.app` 已被允许，然后只用 `--restart-no-build` 再测。若仍全 0，就需要把 ownscribe helper 做成可独立授权的 bundled helper app，而不是由 Python child 直接拉起。
+
+## 2026-05-13 HippoJarvis 麦克风权限修复与真实 ASR 验证
+
+### 修复内容
+
+- 在 `Sources/HippoJarvis/App/AppDelegate.swift` 中引入 `AVFoundation`，App 启动时主动请求麦克风权限。
+- 在 `script/build_and_run.sh` 生成的 `Info.plist` 中加入 `NSMicrophoneUsageDescription`，让 macOS 能把 `HippoJarvis.app` 注册到 `隐私与安全性 -> 麦克风`。
+- 重新构建后验证：
+  - `swift build --product HippoJarvis` 成功。
+  - `dist/HippoJarvis.app/Contents/Info.plist` 包含 `NSMicrophoneUsageDescription`。
+  - 当前授权构建的 designated cdhash 为 `26ba69d0049cf54b7241b08b52e382774884f27c`。
+
+### 真实麦克风录音验证
+
+- 用户在系统设置中重新授权 `HippoJarvis.app` 后，使用 `./script/build_and_run.sh --restart-no-build` 重启，避免再次 rebuild 导致 TCC 授权失效。
+- ownscribe 配置：
+  - `audio_source=mic`
+  - `audio_display=false`
+  - ASR provider: `openai-compatible`
+  - ASR model: `TeleAI/TeleSpeechASR`
+- 测试 session：
+  - `session_6617425e181e`
+  - `recording_started_at=2026-05-13T22:49:53.192919+08:00`
+  - `recording_stopped_at=2026-05-13T22:50:28.964158+08:00`
+  - `wall_duration_seconds=35.771223068237305`
+- 录音文件：
+  - `orchestrator/data/ownscribe/session_6617425e181e/recording.wav`
+  - `1 ch, 48000 Hz, Float32`
+  - `35.6 sec`
+- 远端 ASR 成功返回 transcript：
+  - `source=remote-asr`
+  - `provider=openai-compatible`
+  - `model=TeleAI/TeleSpeechASR`
+  - transcript: `Hippo jarvis microphone validation this is a`
+
+### 当前剩余问题
+
+- summary 仍未生成，因为当前没有设置 `HIPPODEMO_SUMMARY_MODEL`，错误文件为：
+  - `orchestrator/data/ownscribe/session_6617425e181e/summary.error.txt`
+  - 内容：`set HIPPODEMO_SUMMARY_MODEL or expose a model through the provider /v1/models endpoint`
+- 麦克风录音和远端 ASR 链路已经打通；下一步如需验证完整会议纪要，需要配置 summary model。
+
+## 2026-05-13 ai-manus Chat 接入 v1
+
+### 实现内容
+
+- 新增 `orchestrator/adapters/ai_manus.py`：
+  - 默认检测 `http://127.0.0.1:8000/api/v1`。
+  - `status` 先走 `/auth/status`，仅 `auth_provider=none` 时继续检查 `/sessions`。
+  - 统一解包 ai-manus `{code,msg,data}` 响应，`code != 0` 视为失败。
+  - `base_url` 本地只保存根地址，不保存 API key、token 或 Authorization header。
+- 新增 Orchestrator ai-manus proxy：
+  - `GET/POST /integrations/ai-manus/config`
+  - `GET /integrations/ai-manus/status`
+  - `POST /integrations/ai-manus/session`
+  - `GET /integrations/ai-manus/sessions`
+  - `GET /integrations/ai-manus/session/{thread_id}`
+  - `POST /integrations/ai-manus/session/{thread_id}/chat`
+  - `POST /integrations/ai-manus/session/{thread_id}/stop`
+  - 保留 `/sessions/*` 复数路径兼容。
+- 本地 thread 持久化到 `orchestrator/data/ai_manus/threads/*.json`，记录 Hippo thread id、remote Manus session id、messages、plan/tool events。
+- Dashboard Chat 拆出为独立 `DashboardChatView.swift`，接入真实 Manus thread、SSE message stream、plan strip、tool summary、Stop 和 Recent threads。
+- 全局 `/events/history` 只记录 coarse events：
+  - `ai_manus_session_created`
+  - `ai_manus_chat_started`
+  - `ai_manus_plan_updated`
+  - `ai_manus_tool_event`
+  - `ai_manus_chat_completed`
+  - `ai_manus_chat_failed`
+  - `ai_manus_session_stopped`
+
+### 验证结果
+
+- `python -m compileall orchestrator` 通过。
+- `swift build --product HippoJarvis` 通过。
+- `./script/build_and_run.sh --verify` 通过，`HippoJarvis` app process 与 Orchestrator `/health` 均 ready。
+- ai-manus 当前本机 `:8000` 返回不可用状态：
+  - `GET /integrations/ai-manus/status` 返回 `status=unavailable`。
+  - `GET /integrations/ai-manus/sessions` 返回空本地 thread 列表，不影响 `/state`。
+- mock ai-manus SSE 验证通过：
+  - `message/plan/tool/done` 能映射并持久化到本地 thread。
+  - `/events/history` 不包含完整 chat 正文、tool output 或敏感 args。
+
+### 当前边界
+
+- v1 只做代理 Chat / Plan / Tool summary，不嵌入 VNC/noVNC，不做 Take Over。
+- v1 不自动启动 ai-manus Docker Compose；ai-manus 离线时 Chat 显示 unavailable。
+- `AUTH_PROVIDER != none` 时返回 `auth_required`，不会尝试无 token chat。
+
+## 2026-05-13 ai-manus Runtime Console 与 Chat v1 修补
+
+### 实现内容
+
+- 在 Settings Developer Console 中新增 `ai-manus Runtime` 区块：
+  - 可编辑 Hippo adapter 的 `base_url`、`auth_provider`、`timeout_seconds`。
+  - 可编辑 ai-manus `.env` 模型字段：`API_BASE`、`MODEL_NAME`、`API_KEY`、`TEMPERATURE`、`MAX_TOKENS`、`EXTRA_HEADERS`。
+  - 显示 `.env path`、配置来源、`restart required`，保存后不自动重启 ai-manus backend。
+- Orchestrator ai-manus adapter 增加 `.env` 读写能力：
+  - 默认目标为 `./ai-manus/.env`。
+  - `.env` 不存在时读取 `./ai-manus/.env.example` 作为展示来源，保存时创建 `.env`。
+  - API key 只写入 ai-manus `.env`，不进入 Hippo adapter config，API 响应只返回 `api_key_configured`。
+- Chat v1 缺口修补：
+  - `GET /integrations/ai-manus/session/{thread_id}` 在线时会调用远端 `GET /api/v1/sessions/{remote_id}`，合并 remote title/status/files summary。
+  - 创建 thread 和发送 chat 时同步当前 Hippo session 与 artifact metadata。
+  - Dashboard suggestion chips 改为点击即发送预设 prompt；无 thread 时自动创建。
+  - session pill 在无 Hippo session 时回退显示 Manus thread title 或短 session id。
+- 预留 VNC signed URL 与 sandbox files adapter 方法，但本轮不暴露半成品 UI。
+
+### 验证结果
+
+- `python -m compileall orchestrator` 通过。
+- `swift build --product HippoJarvis` 在沙箱外通过；沙箱内失败是 `~/.cache/clang` 权限 / toolchain SDK 访问问题。
+- ai-manus config route smoke 通过：
+  - `.env` 不存在时返回 `env_source=example`、`env_exists=false`。
+  - `POST /integrations/ai-manus/config` 能写入模型字段并返回 `restart_required=true`。
+  - 响应不包含明文 API key。
+  - ai-manus 离线时 `/state` 仍正常返回。
+- ai-manus remote detail merge smoke 通过：
+  - remote title/status/files summary 能合并进 thread detail。
+  - 本地 messages/events 不被远端 detail 覆盖。
+
+### 当前边界
+
+- VNC/noVNC/WKWebView、Take Over、sandbox 文件面板仍属于 ai-manus phase 2。
+- 本轮不自动执行 Docker Compose restart；用户保存模型配置后需要手动重启 ai-manus backend。
+
+## 2026-05-13 ai-manus Phase 2：Sandbox 与 Files
+
+### 实现内容
+
+- Orchestrator 增加 ai-manus sandbox/files 代理：
+  - `POST /integrations/ai-manus/session/{thread_id}/sandbox-access`
+  - `GET /integrations/ai-manus/session/{thread_id}/files`
+  - `POST /integrations/ai-manus/session/{thread_id}/file-view`
+  - `POST /integrations/ai-manus/files/{file_id}/signed-url`
+- 所有 session 级接口继续用 Hippo thread id，内部映射到 remote Manus session id。
+- ai-manus adapter 新增 `frontend_url` 配置，默认 `http://127.0.0.1:8080`：
+  - VNC signed URL 归一为可用 WebSocket URL。
+  - sandbox viewer URL 为 `/chat/{remote_session_id}`。
+  - Take Over URL 为 `/chat/{remote_session_id}?vnc=1`。
+- Dashboard Chat 新增 `Files` 与 `Sandbox` tabs：
+  - `Files` 可刷新 sandbox 文件列表、预览可读文件、打开 signed download link。
+  - `Sandbox` 可按需创建 signed sandbox access，并打开 ai-manus viewer / Take Over 页面。
+  - Take Over 需要用户二次确认，不默认自动打开。
+- Settings 的 ai-manus Runtime Console 新增 `Frontend URL` 字段。
+
+### 验证结果
+
+- `python -m compileall orchestrator` 通过。
+- `swift build --product HippoJarvis` 通过。
+- `./script/build_and_run.sh --verify` 通过，`HippoJarvis` app process 与 Orchestrator `/health` 均 ready。
+- ai-manus phase2 proxy smoke 通过：
+  - sandbox access 返回 `websocket_url`、`interactive_url`、`take_over_url`。
+  - files list 兼容 `file_id`、`filename`、`file_path`、`file_url`。
+  - file preview 使用 sandbox `file_path`。
+  - download link 响应包含可直接打开的 `url`。
+- 顺手修复一个 Swift 6 编译阻塞点：`DashboardWindow.eventGroup` 在多语句 `some View` 函数中补显式 `return`。
+
+### 当前边界
+
+- Hippo 本轮不手写 noVNC/WKWebView 客户端；Sandbox 打开 ai-manus 自己的 VNC/takeover 页面。
+- 本轮不做本机 CUA 与 ai-manus sandbox takeover 的双向同步；本机外部可见插入仍由 `cua-driver` 负责。

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .models import (
     ActiveTask,
+    AiManusThread,
+    AiManusThreadEvent,
+    AiManusThreadMessage,
     Artifact,
     DemoSession,
     OrchestratorEvent,
@@ -22,6 +26,8 @@ DATA_DIR = BASE_DIR / "data"
 ARTIFACT_DIR = DATA_DIR / "artifacts"
 SESSION_DIR = DATA_DIR / "sessions"
 SKILL_DIR = DATA_DIR / "skills"
+AI_MANUS_DIR = DATA_DIR / "ai_manus"
+AI_MANUS_THREAD_DIR = AI_MANUS_DIR / "threads"
 
 
 def to_dict(model: Any) -> Dict[str, Any]:
@@ -81,6 +87,7 @@ class OrchestratorStore:
     def default_services() -> List[ServiceStatus]:
         return [
             ServiceStatus(name="ownscribe", status="available", detail="ownscribe adapter pending status refresh"),
+            ServiceStatus(name="ai-manus", status="available", detail="ai-manus adapter pending status refresh"),
             ServiceStatus(name="vlmac", status="mock", detail="video capture placeholder"),
             ServiceStatus(name="OpenChronicle", status="available", detail="OpenChronicle CLI adapter pending status refresh"),
             ServiceStatus(name="cua-driver", status="available", detail="cua-driver adapter pending status refresh"),
@@ -159,6 +166,43 @@ class OrchestratorStore:
             return removed
 
         raise KeyError(skill_id)
+
+    def list_ai_manus_threads(self) -> List[AiManusThread]:
+        if not AI_MANUS_THREAD_DIR.exists():
+            return []
+
+        threads: List[AiManusThread] = []
+        for path in AI_MANUS_THREAD_DIR.glob("*.json"):
+            try:
+                threads.append(AiManusThread(**json.loads(path.read_text(encoding="utf-8"))))
+            except Exception:
+                continue
+        return sorted(threads, key=lambda thread: thread.updated_at, reverse=True)
+
+    def get_ai_manus_thread(self, session_id: str) -> AiManusThread:
+        path = AI_MANUS_THREAD_DIR / f"{session_id}.json"
+        if not path.exists():
+            raise KeyError(session_id)
+        return AiManusThread(**json.loads(path.read_text(encoding="utf-8")))
+
+    async def save_ai_manus_thread(self, thread: AiManusThread) -> AiManusThread:
+        thread.updated_at = now_iso()
+        write_json(AI_MANUS_THREAD_DIR / f"{thread.session_id}.json", to_dict(thread))
+        return thread
+
+    async def append_ai_manus_message(self, session_id: str, message: AiManusThreadMessage) -> AiManusThread:
+        thread = self.get_ai_manus_thread(session_id)
+        thread.messages.append(message)
+        thread.latest_message = message.content
+        thread.latest_message_at = int(datetime.fromisoformat(message.timestamp).timestamp())
+        return await self.save_ai_manus_thread(thread)
+
+    async def append_ai_manus_event(self, session_id: str, event: AiManusThreadEvent) -> AiManusThread:
+        thread = self.get_ai_manus_thread(session_id)
+        thread.events.append(event)
+        if event.data.get("status"):
+            thread.status = str(event.data["status"])
+        return await self.save_ai_manus_thread(thread)
 
 
 store = OrchestratorStore()

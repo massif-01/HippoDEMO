@@ -18,6 +18,40 @@ cd "$ROOT_DIR"
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 pkill -f "uvicorn orchestrator.main:app --host 127.0.0.1 --port 8787" >/dev/null 2>&1 || true
 
+verify_launch() {
+  for _ in {1..40}; do
+    if pgrep -x "$APP_NAME" >/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  pgrep -x "$APP_NAME" >/dev/null
+
+  for _ in {1..100}; do
+    if curl -fsS http://127.0.0.1:8787/health >/dev/null 2>&1; then
+      sleep 2
+      pgrep -x "$APP_NAME" >/dev/null
+      echo "$APP_NAME verified: app process and Orchestrator health are ready"
+      exit 0
+    fi
+    sleep 0.25
+  done
+
+  echo "$APP_NAME launched, but Orchestrator health did not become ready" >&2
+  exit 1
+}
+
+case "$MODE" in
+  --restart-no-build|restart-no-build)
+    if [[ ! -x "$APP_BINARY" ]]; then
+      echo "$APP_BINARY does not exist; run $0 --verify once to build the app bundle" >&2
+      exit 2
+    fi
+    /usr/bin/open -n "$APP_BUNDLE"
+    verify_launch
+    ;;
+esac
+
 swift build --product "$APP_NAME"
 BUILD_BINARY="$(swift build --show-bin-path)/$APP_NAME"
 
@@ -43,9 +77,13 @@ cat >"$INFO_PLIST" <<PLIST
   <string>$MIN_SYSTEM_VERSION</string>
   <key>NSPrincipalClass</key>
   <string>NSApplication</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>HippoJarvis records meeting audio from the microphone when Jarvis is enabled.</string>
 </dict>
 </plist>
 PLIST
+
+/usr/bin/codesign --force --sign - --identifier "$BUNDLE_ID" "$APP_BUNDLE" >/dev/null
 
 open_app() {
   /usr/bin/open -n "$APP_BUNDLE"
@@ -68,29 +106,10 @@ case "$MODE" in
     ;;
   --verify|verify)
     open_app
-    for _ in {1..40}; do
-      if pgrep -x "$APP_NAME" >/dev/null; then
-        break
-      fi
-      sleep 0.25
-    done
-    pgrep -x "$APP_NAME" >/dev/null
-
-    for _ in {1..100}; do
-      if curl -fsS http://127.0.0.1:8787/health >/dev/null 2>&1; then
-        sleep 2
-        pgrep -x "$APP_NAME" >/dev/null
-        echo "$APP_NAME verified: app process and Orchestrator health are ready"
-        exit 0
-      fi
-      sleep 0.25
-    done
-
-    echo "$APP_NAME launched, but Orchestrator health did not become ready" >&2
-    exit 1
+    verify_launch
     ;;
   *)
-    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify]" >&2
+    echo "usage: $0 [run|--debug|--logs|--telemetry|--verify|--restart-no-build]" >&2
     exit 2
     ;;
 esac

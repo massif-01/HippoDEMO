@@ -183,3 +183,74 @@ class OwnscribeConfigRequest(BaseModel):
     summary_model: Optional[str] = None
     summary_api_key: Optional[str] = None
     api_key: Optional[str] = None
+
+
+class AiManusConfigRequest(BaseModel):
+    base_url: Optional[str] = None
+    frontend_url: Optional[str] = None
+    auth_provider: Optional[str] = None
+    api_key: Optional[str] = None
+    timeout_seconds: Optional[float] = None
+    api_base: Optional[str] = None
+    model_name: Optional[str] = None
+    temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
+    extra_headers: Optional[str] = None
+
+
+class AiManusCreateSessionRequest(BaseModel):
+    title: Optional[str] = None
+
+
+class AiManusChatRequest(BaseModel):
+    timestamp: Optional[int] = None
+    message: Optional[str] = None
+    attachments: Optional[List[Dict[str, Any]]] = None
+    event_id: Optional[str] = None
+
+
+class AiManusSignedUrlRequest(BaseModel):
+    expire_minutes: int = Field(15, ge=1, le=15)
+
+
+class AiManusRuntimeCommandRequest(BaseModel):
+    build: bool = False
+
+
+class AiManusFileViewRequest(BaseModel):
+    file_id: Optional[str] = None
+    file_path: Optional[str] = None
+    file: Optional[str] = None
+    path: Optional[str] = None
+
+
+class AiManusThreadMessage(BaseModel):
+    id: str = Field(default_factory=lambda: new_id("message"))
+    role: str
+    content: str = ""
+    timestamp: str = Field(default_factory=now_iso)
+    event_id: Optional[str] = None
+    attachments: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class AiManusThreadEvent(BaseModel):
+    event: str
+    data: Dict[str, Any] = Field(default_factory=dict)
+    timestamp: str = Field(default_factory=now_iso)
+    event_id: Optional[str] = None
+
+
+class AiManusThread(BaseModel):
+    session_id: str
+    manus_session_id: Optional[str] = None
+    title: Optional[str] = None
+    status: str = "active"
+    created_at: str = Field(default_factory=now_iso)
+    updated_at: str = Field(default_factory=now_iso)
+    latest_message: Optional[str] = None
+    latest_message_at: Optional[int] = None
+    unread_message_count: int = 0
+    is_shared: bool = False
+    messages: List[AiManusThreadMessage] = Field(default_factory=list)
+    events: List[AiManusThreadEvent] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)

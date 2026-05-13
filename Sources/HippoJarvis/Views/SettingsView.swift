@@ -9,6 +9,16 @@ struct SettingsView: View {
     @State private var summaryBaseURLDraft = ""
     @State private var summaryModelDraft = ""
     @State private var summaryKeyDraft = ""
+    @State private var aiManusBaseURLDraft = ""
+    @State private var aiManusFrontendURLDraft = ""
+    @State private var aiManusAuthProviderDraft = ""
+    @State private var aiManusTimeoutDraft = ""
+    @State private var aiManusAPIBaseDraft = ""
+    @State private var aiManusModelDraft = ""
+    @State private var aiManusKeyDraft = ""
+    @State private var aiManusTemperatureDraft = ""
+    @State private var aiManusMaxTokensDraft = ""
+    @State private var aiManusExtraHeadersDraft = ""
 
     private let serviceColumns = [
         GridItem(.adaptive(minimum: 210), spacing: 10, alignment: .top)
@@ -21,6 +31,7 @@ struct SettingsView: View {
                 runtimeOverview
                 serviceMatrix
                 ownscribeAudioConsole
+                aiManusRuntimeConsole
                 openChronicleConsole
                 cuaDriverConsole
                 secondaryControls
@@ -32,10 +43,15 @@ struct SettingsView: View {
         .task {
             await store.bootstrap()
             await store.refreshOwnscribeConsole()
+            await store.refreshManus()
             syncProviderDrafts()
+            syncAiManusDrafts()
         }
         .onChange(of: store.ownscribeConfig) {
             syncProviderDrafts()
+        }
+        .onChange(of: store.aiManusConfig) {
+            syncAiManusDrafts()
         }
     }
 
@@ -260,6 +276,114 @@ struct SettingsView: View {
         }
     }
 
+    private var aiManusRuntimeConsole: some View {
+        HUDSection("ai-manus Runtime", systemImage: "cpu") {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    if let aiManusService {
+                        ServiceLight(
+                            service: aiManusService,
+                            title: "ai-manus",
+                            detail: store.serviceDetail(aiManusService.detail, status: aiManusService.status)
+                        )
+                    } else {
+                        Text(store.text(.notReported))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+
+                    statusBadge(store.aiManusStatus.status, title: store.serviceStatus(store.aiManusStatus.status))
+                    if store.aiManusConfig.restartRequired == true {
+                        statusBadge("mock", title: "restart required")
+                    }
+                }
+
+                Divider()
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible(), spacing: 10),
+                    GridItem(.flexible(), spacing: 10)
+                ], spacing: 10) {
+                    providerField("Hippo base_url", text: $aiManusBaseURLDraft)
+                    providerField("Frontend URL", text: $aiManusFrontendURLDraft)
+                    providerField("AUTH_PROVIDER", text: $aiManusAuthProviderDraft)
+                    providerField("Timeout seconds", text: $aiManusTimeoutDraft)
+                    providerField("API_BASE", text: $aiManusAPIBaseDraft)
+                    providerField("MODEL_NAME", text: $aiManusModelDraft)
+                    providerSecureField("API_KEY", text: $aiManusKeyDraft)
+                    providerField("TEMPERATURE", text: $aiManusTemperatureDraft)
+                    providerField("MAX_TOKENS", text: $aiManusMaxTokensDraft)
+                }
+
+                providerField("EXTRA_HEADERS", text: $aiManusExtraHeadersDraft)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 8) {
+                        commandButton("Start ai-manus", icon: "play.fill", tone: .primary) {
+                            await store.aiManusRuntimeStart()
+                            syncAiManusDrafts()
+                        }
+                        .disabled(store.isRunningAiManusRuntimeCommand)
+
+                        commandButton("Restart", icon: "arrow.triangle.2.circlepath", tone: .amber) {
+                            await store.aiManusRuntimeRestart()
+                            syncAiManusDrafts()
+                        }
+                        .disabled(store.isRunningAiManusRuntimeCommand)
+
+                        commandButton("Stop", icon: "stop.fill", tone: .destructive) {
+                            await store.aiManusRuntimeStop()
+                            syncAiManusDrafts()
+                        }
+                        .disabled(store.isRunningAiManusRuntimeCommand)
+
+                        commandButton("Logs", icon: "terminal", tone: .quiet) {
+                            await store.refreshAiManusRuntimeLogs()
+                        }
+                        .disabled(store.isRunningAiManusRuntimeCommand)
+                    }
+
+                    if let commandDetail = aiManusRuntimeCommandDetail {
+                        Text(commandDetail)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+
+                    if !aiManusRuntimeLogLines.isEmpty {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(aiManusRuntimeLogLines.enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                        }
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    commandButton("Save ai-manus", icon: "square.and.arrow.down", tone: .primary) {
+                        await saveAiManusConfig()
+                    }
+                    commandButton(store.text(.refresh), icon: "arrow.clockwise", tone: .quiet) {
+                        await store.refreshManus()
+                        syncAiManusDrafts()
+                    }
+                    Text(aiManusRuntimeDetail)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
     private var openChronicleConsole: some View {
         HUDSection(store.text(.openChronicleControls), systemImage: "record.circle") {
             VStack(alignment: .leading, spacing: 12) {
@@ -377,6 +501,32 @@ struct SettingsView: View {
         store.snapshot.services.first { $0.name.lowercased() == "ownscribe" }
     }
 
+    private var aiManusService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.lowercased() == "ai-manus" }
+    }
+
+    private var aiManusRuntimeDetail: String {
+        let env = store.aiManusConfig.envPath ?? "ai-manus/.env"
+        let source = store.aiManusConfig.envExists == true ? "env" : (store.aiManusConfig.envSource ?? "missing")
+        let restart = store.aiManusConfig.restartRequired == true ? " · restart ai-manus backend to apply" : ""
+        return "\(env) · \(source)\(restart)"
+    }
+
+    private var aiManusRuntimeCommandDetail: String? {
+        guard let command = store.aiManusRuntimeLastCommand else { return nil }
+        let action = command.action ?? "runtime"
+        let status = command.status ?? "unknown"
+        let pid = command.pid.map { " · pid \($0)" } ?? ""
+        let logPath = command.logPath.map { " · log \($0)" } ?? ""
+        return "\(action) \(status)\(pid)\(logPath)"
+    }
+
+    private var aiManusRuntimeLogLines: [String] {
+        let lines = store.aiManusRuntimeLogs.lines
+        if lines.count <= 6 { return lines }
+        return Array(lines.suffix(6))
+    }
+
     private func audioSourceLabel(_ source: OwnscribeAudioSource) -> String {
         switch source {
         case .system:
@@ -454,9 +604,52 @@ struct SettingsView: View {
         summaryModelDraft = store.ownscribeConfig.summaryModel ?? ""
     }
 
+    private func saveAiManusConfig() async {
+        await store.updateAiManusConfig(
+            baseUrl: nonEmpty(aiManusBaseURLDraft),
+            frontendUrl: nonEmpty(aiManusFrontendURLDraft),
+            authProvider: nonEmpty(aiManusAuthProviderDraft),
+            timeoutSeconds: doubleValue(aiManusTimeoutDraft),
+            apiBase: nonEmpty(aiManusAPIBaseDraft),
+            modelName: nonEmpty(aiManusModelDraft),
+            apiKey: nonEmpty(aiManusKeyDraft),
+            temperature: doubleValue(aiManusTemperatureDraft),
+            maxTokens: intValue(aiManusMaxTokensDraft),
+            extraHeaders: nonEmpty(aiManusExtraHeadersDraft)
+        )
+        aiManusKeyDraft = ""
+        syncAiManusDrafts()
+    }
+
+    private func syncAiManusDrafts() {
+        aiManusBaseURLDraft = store.aiManusConfig.baseUrl ?? ""
+        aiManusFrontendURLDraft = store.aiManusConfig.frontendUrl ?? ""
+        aiManusAuthProviderDraft = store.aiManusConfig.authProvider ?? "none"
+        aiManusTimeoutDraft = store.aiManusConfig.timeoutSeconds.map { formatNumber($0) } ?? ""
+        aiManusAPIBaseDraft = store.aiManusConfig.apiBase ?? ""
+        aiManusModelDraft = store.aiManusConfig.modelName ?? ""
+        aiManusTemperatureDraft = store.aiManusConfig.temperature.map { formatNumber($0) } ?? ""
+        aiManusMaxTokensDraft = store.aiManusConfig.maxTokens.map(String.init) ?? ""
+        aiManusExtraHeadersDraft = store.aiManusConfig.extraHeaders ?? ""
+    }
+
     private func nonEmpty(_ value: String) -> String? {
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func doubleValue(_ value: String) -> Double? {
+        guard let text = nonEmpty(value) else { return nil }
+        return Double(text)
+    }
+
+    private func intValue(_ value: String) -> Int? {
+        guard let text = nonEmpty(value) else { return nil }
+        return Int(text)
+    }
+
+    private func formatNumber(_ value: Double) -> String {
+        value.rounded() == value ? String(Int(value)) : String(value)
     }
 
     private func commandButton(_ title: String, icon: String, tone: JarvisActionButton.Tone, action: @escaping () async -> Void) -> some View {

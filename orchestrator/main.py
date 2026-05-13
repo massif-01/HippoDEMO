@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
 
@@ -14,6 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from .adapters.openchronicle import openchronicle_adapter
 from .adapters.cua_driver import cua_driver_adapter
+from .adapters.ai_manus import AiManusAuthRequired, ai_manus_adapter
 from .adapters.project_cortex import sop_adapter
 try:
     from .adapters.ownscribe import ownscribe_adapter
@@ -23,6 +25,15 @@ from .models import (
     ActiveTask,
     ActiveTaskGenerateRequest,
     ActiveTaskStatus,
+    AiManusChatRequest,
+    AiManusConfigRequest,
+    AiManusCreateSessionRequest,
+    AiManusFileViewRequest,
+    AiManusRuntimeCommandRequest,
+    AiManusSignedUrlRequest,
+    AiManusThread,
+    AiManusThreadEvent,
+    AiManusThreadMessage,
     Artifact,
     CaptureFinishRequest,
     CaptureStatus,
@@ -53,9 +64,11 @@ app.add_middleware(
 OPENCHRONICLE_STATUS_TTL_SECONDS = 10.0
 OWNSCRIBE_STATUS_TTL_SECONDS = 10.0
 CUA_STATUS_TTL_SECONDS = 10.0
+AI_MANUS_STATUS_TTL_SECONDS = 10.0
 _openchronicle_status_checked_at = 0.0
 _ownscribe_status_checked_at = 0.0
 _cua_status_checked_at = 0.0
+_ai_manus_status_checked_at = 0.0
 
 
 def _float_env(name: str, default: float) -> float:
@@ -136,6 +149,175 @@ def _service_payload(service: ServiceStatus) -> dict:
         "status": service.status,
         "detail": service.detail,
     }
+
+
+def _ai_manus_session_id(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("session_id") or payload.get("id")
+
+
+def _ai_manus_remote_session_id(thread: AiManusThread) -> str:
+    return thread.manus_session_id or str(thread.metadata.get("manus_session_id") or thread.session_id)
+
+
+def _unix_timestamp(value: str | None) -> int | None:
+    if not value:
+        return None
+    try:
+        return int(datetime.fromisoformat(value).timestamp())
+    except ValueError:
+        return None
+
+
+def _ai_manus_message_payload(message: AiManusThreadMessage) -> dict:
+    return {
+        "id": message.id,
+        "role": message.role,
+        "content": message.content,
+        "timestamp": _unix_timestamp(message.timestamp),
+        "event_id": message.event_id,
+        "attachments": message.attachments,
+    }
+
+
+def _ai_manus_event_payload(event: AiManusThreadEvent) -> dict:
+    return {
+        "event": event.event,
+        "data": event.data,
+    }
+
+
+def _ai_manus_link_metadata() -> dict:
+    session = store.state.current_session
+    if not session:
+        return {
+            "hippo_session_id": None,
+            "hippo_session_title": None,
+            "hippo_artifacts": [],
+        }
+    return {
+        "hippo_session_id": session.id,
+        "hippo_session_title": session.title,
+        "hippo_artifacts": [
+            {
+                "id": artifact.id,
+                "type": artifact.type,
+                "title": artifact.title,
+                "path": artifact.path,
+            }
+            for artifact in session.artifacts
+        ],
+    }
+
+
+def _refresh_ai_manus_thread_links(thread: AiManusThread) -> AiManusThread:
+    thread.metadata.update(_ai_manus_link_metadata())
+    return thread
+
+
+def _ai_manus_remote_summary(payload: Any) -> dict | None:
+    if not isinstance(payload, dict):
+        return None
+    files = payload.get("files") if isinstance(payload.get("files"), list) else []
+    file_summary = []
+    for item in files[:20]:
+        if not isinstance(item, dict):
+            continue
+        file_summary.append(
+            {
+                "name": item.get("name") or item.get("filename") or item.get("path"),
+                "path": item.get("path"),
+                "size": item.get("size") or item.get("size_bytes"),
+            }
+        )
+    return {
+        "session_id": payload.get("session_id") or payload.get("id"),
+        "title": payload.get("title"),
+        "status": payload.get("status"),
+        "files_count": len(files),
+        "files": file_summary,
+    }
+
+
+def _ai_manus_thread_summary(thread: AiManusThread) -> dict:
+    return {
+        "session_id": thread.session_id,
+        "manus_session_id": _ai_manus_remote_session_id(thread),
+        "title": thread.title,
+        "status": thread.status,
+        "latest_message": thread.latest_message,
+        "latest_message_at": thread.latest_message_at,
+        "unread_message_count": thread.unread_message_count,
+        "is_shared": thread.is_shared,
+        "updated_at": thread.updated_at,
+    }
+
+
+def _ai_manus_thread_detail(thread: AiManusThread) -> dict:
+    return {
+        **_ai_manus_thread_summary(thread),
+        "created_at": thread.created_at,
+        "messages": [_ai_manus_message_payload(message) for message in thread.messages],
+        "events": [_ai_manus_event_payload(event) for event in thread.events],
+        "remote": thread.metadata.get("remote"),
+        "metadata": {
+            key: value
+            for key, value in thread.metadata.items()
+            if key.lower() not in {"api_key", "authorization", "token"}
+        },
+    }
+
+
+def _ai_manus_status_payload(service: ServiceStatus) -> dict:
+    return {
+        "ok": service.status == "online",
+        "status": service.status,
+        "detail": service.detail,
+        "config": ai_manus_adapter.config(),
+    }
+
+
+def _ai_manus_thread_or_404(thread_id: str) -> AiManusThread:
+    try:
+        return store.get_ai_manus_thread(thread_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=f"Unknown ai-manus thread: {thread_id}") from exc
+
+
+async def _require_ai_manus_online() -> ServiceStatus:
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+    if service.status == "auth_required":
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"])
+    if service.status != "online":
+        raise HTTPException(status_code=503, detail=service.detail or "ai-manus backend unavailable")
+    return service
+
+
+def _ai_manus_files_count(payload: Any) -> int:
+    if isinstance(payload, list):
+        return len(payload)
+    if isinstance(payload, dict) and isinstance(payload.get("files"), list):
+        return len(payload["files"])
+    return 0
+
+
+def _ai_manus_file_path(request: AiManusFileViewRequest) -> str:
+    file_path = request.file_path or request.file or request.path
+    if not file_path:
+        raise HTTPException(status_code=422, detail="file_path is required")
+    return file_path
+
+
+def _sse(event: str, data: Any = None, *, event_id: str | None = None) -> str:
+    lines = []
+    if event_id:
+        lines.append(f"id: {event_id}")
+    lines.append(f"event: {event}")
+    lines.append(f"data: {json.dumps(data or {}, ensure_ascii=False)}")
+    return "\n".join(lines) + "\n\n"
 
 
 def _set_service_status(service: ServiceStatus) -> None:
@@ -286,6 +468,25 @@ async def _refresh_cua_status() -> ServiceStatus:
         return service
 
 
+async def _refresh_ai_manus_status() -> ServiceStatus:
+    global _ai_manus_status_checked_at
+
+    now = time.monotonic()
+    current = next(
+        (service for service in store.state.services if service.name.lower() == "ai-manus"),
+        None,
+    )
+    if current and now - _ai_manus_status_checked_at < AI_MANUS_STATUS_TTL_SECONDS:
+        return current
+
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        _set_service_status(service)
+        await store.persist()
+        _ai_manus_status_checked_at = time.monotonic()
+        return service
+
+
 async def _apply_openchronicle_status(service: ServiceStatus) -> None:
     global _openchronicle_status_checked_at
 
@@ -308,6 +509,14 @@ async def _apply_cua_status(service: ServiceStatus) -> None:
     _set_service_status(service)
     await store.persist()
     _cua_status_checked_at = time.monotonic()
+
+
+async def _apply_ai_manus_status(service: ServiceStatus) -> None:
+    global _ai_manus_status_checked_at
+
+    _set_service_status(service)
+    await store.persist()
+    _ai_manus_status_checked_at = time.monotonic()
 
 
 def _sop_state() -> str:
@@ -647,6 +856,16 @@ def _insert_action_and_text(task: ActiveTask) -> tuple[ProposedAction | None, st
     return None, None
 
 
+def _action_target_surface(action: ProposedAction) -> CuaTargetSurface | None:
+    payload = action.payload.get("target_surface")
+    if not isinstance(payload, dict):
+        return None
+    try:
+        return CuaTargetSurface.model_validate(payload)
+    except Exception:
+        return None
+
+
 def _cua_result_payload(result) -> dict[str, Any]:
     return {
         "ok": result.ok,
@@ -714,6 +933,7 @@ async def get_state():
     await _refresh_openchronicle_status()
     await _refresh_ownscribe_status()
     await _refresh_cua_status()
+    await _refresh_ai_manus_status()
     return state_payload()
 
 
@@ -980,6 +1200,493 @@ async def ownscribe_preflight(network: bool = False):
     return adapter.preflight(network=network)
 
 
+@app.get("/integrations/ai-manus/config")
+async def ai_manus_config():
+    return ai_manus_adapter.config()
+
+
+@app.post("/integrations/ai-manus/config")
+async def ai_manus_update_config(request: AiManusConfigRequest):
+    config = ai_manus_adapter.update_config(
+        base_url=request.base_url,
+        frontend_url=request.frontend_url,
+        auth_provider=request.auth_provider,
+        api_key=request.api_key,
+        timeout_seconds=request.timeout_seconds,
+        api_base=request.api_base,
+        model_name=request.model_name,
+        temperature=request.temperature,
+        max_tokens=request.max_tokens,
+        extra_headers=request.extra_headers,
+    )
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+        await store.publish(
+            "ai_manus_config_updated",
+            {
+                "base_url": config["base_url"],
+                "frontend_url": config["frontend_url"],
+                "api_base_url": config["api_base_url"],
+                "auth_provider": config["auth_provider"],
+                "api_key_configured": config["api_key_configured"],
+                "extra_headers_configured": config.get("extra_headers_configured"),
+                "model_name": config.get("model_name"),
+                "restart_required": config.get("restart_required"),
+            },
+        )
+    return config
+
+
+@app.get("/integrations/ai-manus/status")
+async def ai_manus_status():
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+        return _ai_manus_status_payload(service)
+
+
+@app.post("/integrations/ai-manus/runtime/start")
+async def ai_manus_runtime_start(request: AiManusRuntimeCommandRequest | None = None):
+    result = ai_manus_adapter.start_runtime(build=bool(request.build) if request else False)
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+        await store.publish(
+            "ai_manus_runtime_command",
+            {
+                "action": result.get("action"),
+                "status": result.get("status"),
+                "pid": result.get("pid"),
+                "log_path": result.get("log_path"),
+            },
+        )
+    return {**result, "service": to_dict(service)}
+
+
+@app.post("/integrations/ai-manus/runtime/stop")
+async def ai_manus_runtime_stop():
+    result = ai_manus_adapter.stop_runtime()
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+        await store.publish(
+            "ai_manus_runtime_command",
+            {
+                "action": result.get("action"),
+                "status": result.get("status"),
+                "pid": result.get("pid"),
+                "log_path": result.get("log_path"),
+            },
+        )
+    return {**result, "service": to_dict(service)}
+
+
+@app.post("/integrations/ai-manus/runtime/restart")
+async def ai_manus_runtime_restart(request: AiManusRuntimeCommandRequest | None = None):
+    result = ai_manus_adapter.restart_runtime(build=bool(request.build) if request else False)
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+        await store.publish(
+            "ai_manus_runtime_command",
+            {
+                "action": result.get("action"),
+                "status": result.get("status"),
+                "pid": result.get("pid"),
+                "log_path": result.get("log_path"),
+            },
+        )
+    return {**result, "service": to_dict(service)}
+
+
+@app.get("/integrations/ai-manus/runtime/logs")
+async def ai_manus_runtime_logs(limit: int = 80):
+    return ai_manus_adapter.runtime_logs(limit=limit)
+
+
+@app.post("/integrations/ai-manus/session")
+@app.put("/integrations/ai-manus/sessions")
+async def ai_manus_create_session(request: AiManusCreateSessionRequest | None = None):
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+    if service.status == "auth_required":
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"])
+    if service.status != "online":
+        raise HTTPException(status_code=503, detail=service.detail or "ai-manus backend unavailable")
+    try:
+        data = await ai_manus_adapter.create_session()
+    except AiManusAuthRequired:
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"]) from None
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai-manus create session failed: {exc}") from exc
+
+    manus_session_id = _ai_manus_session_id(data)
+    if not manus_session_id:
+        raise HTTPException(status_code=502, detail="ai-manus create session returned no session_id")
+    thread_id = new_id("manus_thread")
+    thread = AiManusThread(
+        session_id=thread_id,
+        manus_session_id=manus_session_id,
+        title=(request.title if request else None) or (data.get("title") if isinstance(data, dict) else None),
+        status=str(data.get("status") or "active") if isinstance(data, dict) else "active",
+        metadata={
+            "source": "ai-manus",
+            "manus_session_id": manus_session_id,
+            **_ai_manus_link_metadata(),
+        },
+    )
+    async with store._lock:
+        await store.save_ai_manus_thread(thread)
+        await store.publish(
+            "ai_manus_session_created",
+            {"session_id": thread_id, "manus_session_id": manus_session_id, "status": thread.status},
+            session_id=thread_id,
+        )
+    return {
+        "session_id": thread_id,
+        "manus_session_id": manus_session_id,
+        "thread": _ai_manus_thread_summary(thread),
+    }
+
+
+@app.get("/integrations/ai-manus/sessions")
+async def ai_manus_sessions():
+    local_threads = [_ai_manus_thread_summary(thread) for thread in store.list_ai_manus_threads()]
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+    if service.status == "auth_required":
+        return {**ai_manus_adapter.auth_required_payload(), "sessions": local_threads, "local_threads": local_threads}
+    if service.status != "online":
+        return {
+            "status": service.status,
+            "detail": service.detail,
+            "sessions": local_threads,
+            "local_threads": local_threads,
+        }
+    try:
+        data = await ai_manus_adapter.list_sessions()
+    except AiManusAuthRequired:
+        return {**ai_manus_adapter.auth_required_payload(), "sessions": local_threads, "local_threads": local_threads}
+    except Exception as exc:
+        return {
+            "status": "unavailable",
+            "detail": f"ai-manus list sessions failed: {exc}",
+            "sessions": local_threads,
+            "local_threads": local_threads,
+        }
+    return {"status": "online", "remote": data, "sessions": local_threads, "local_threads": local_threads}
+
+
+@app.get("/integrations/ai-manus/session/{session_id}")
+@app.get("/integrations/ai-manus/session/{session_id}/detail")
+@app.get("/integrations/ai-manus/sessions/{session_id}")
+async def ai_manus_session_detail(session_id: str):
+    try:
+        local_thread = store.get_ai_manus_thread(session_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown ai-manus thread: {session_id}") from None
+
+    detail = _ai_manus_thread_detail(local_thread)
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+    if service.status != "online":
+        detail["remote_status"] = service.status
+        detail["remote_detail"] = service.detail
+        return detail
+
+    try:
+        remote_data = await ai_manus_adapter.get_session(_ai_manus_remote_session_id(local_thread))
+        remote = _ai_manus_remote_summary(remote_data)
+        if remote:
+            detail["remote"] = remote
+            detail["remote_status"] = remote.get("status")
+            if remote.get("title") and not detail.get("title"):
+                detail["title"] = remote["title"]
+            if remote.get("status"):
+                detail["status"] = str(remote["status"])
+            async with store._lock:
+                local_thread.metadata["remote"] = remote
+                await store.save_ai_manus_thread(local_thread)
+    except Exception as exc:
+        detail["remote_status"] = "unavailable"
+        detail["remote_detail"] = str(exc)
+    return detail
+
+
+@app.post("/integrations/ai-manus/session/{session_id}/chat")
+@app.post("/integrations/ai-manus/sessions/{session_id}/chat")
+async def ai_manus_chat(session_id: str, request: AiManusChatRequest):
+    async def stream() -> AsyncGenerator[str, None]:
+        try:
+            thread = store.get_ai_manus_thread(session_id)
+        except KeyError:
+            yield _sse("error", {"error": f"Unknown ai-manus thread: {session_id}"})
+            return
+        thread = _refresh_ai_manus_thread_links(thread)
+        await store.save_ai_manus_thread(thread)
+
+        service = await ai_manus_adapter.status()
+        async with store._lock:
+            await _apply_ai_manus_status(service)
+        if service.status == "auth_required":
+            yield _sse("auth_required", ai_manus_adapter.auth_required_payload())
+            return
+        if service.status != "online":
+            await store.publish("ai_manus_chat_failed", {"session_id": session_id}, session_id=session_id)
+            yield _sse("error", {"error": service.detail or "ai-manus backend unavailable"})
+            return
+
+        message_chars = len(request.message or "")
+        attachments_count = len(request.attachments or [])
+        try:
+            if request.message:
+                await store.append_ai_manus_message(
+                    session_id,
+                    AiManusThreadMessage(
+                        role="user",
+                        content=request.message,
+                        event_id=request.event_id,
+                        attachments=request.attachments or [],
+                    ),
+                )
+            await store.publish(
+                "ai_manus_chat_started",
+                {
+                    "session_id": session_id,
+                    "message_chars": message_chars,
+                    "attachments_count": attachments_count,
+                },
+                session_id=session_id,
+            )
+
+            event_count = 0
+            async for sse_event in ai_manus_adapter.stream_chat(
+                session_id=_ai_manus_remote_session_id(thread),
+                message=request.message,
+                timestamp=request.timestamp,
+                event_id=request.event_id,
+                attachments=request.attachments,
+            ):
+                event_count += 1
+                event_name = str(sse_event.get("event") or "message")
+                data = sse_event.get("data") or {}
+                await store.append_ai_manus_event(
+                    session_id,
+                    AiManusThreadEvent(
+                        event=event_name,
+                        data=data if isinstance(data, dict) else {"value": data},
+                        event_id=sse_event.get("id"),
+                    ),
+                )
+                if event_name in {"plan", "plan_updated"}:
+                    steps_count = 0
+                    if isinstance(data, dict) and isinstance(data.get("steps"), list):
+                        steps_count = len(data["steps"])
+                    await store.publish(
+                        "ai_manus_plan_updated",
+                        {"session_id": session_id, "steps_count": steps_count},
+                        session_id=session_id,
+                    )
+                if event_name in {"tool", "tool_event"}:
+                    tool_payload = {
+                        "session_id": session_id,
+                        "tool_call_id": data.get("tool_call_id") if isinstance(data, dict) else None,
+                        "name": data.get("name") if isinstance(data, dict) else None,
+                        "function": data.get("function") if isinstance(data, dict) else None,
+                        "status": data.get("status") if isinstance(data, dict) else None,
+                    }
+                    await store.publish("ai_manus_tool_event", tool_payload, session_id=session_id)
+                if event_name == "message" and isinstance(data, dict) and data.get("role") == "assistant":
+                    content = str(data.get("content") or data.get("message") or "")
+                    if content:
+                        await store.append_ai_manus_message(
+                            session_id,
+                            AiManusThreadMessage(role="assistant", content=content, event_id=sse_event.get("id")),
+                        )
+                yield _sse(event_name, data, event_id=sse_event.get("id"))
+
+            await store.publish(
+                "ai_manus_chat_completed",
+                {"session_id": session_id, "event_count": event_count},
+                session_id=session_id,
+            )
+        except AiManusAuthRequired:
+            yield _sse("auth_required", ai_manus_adapter.auth_required_payload())
+        except Exception as exc:
+            with_error = AiManusThreadEvent(event="error", data={"error": str(exc)})
+            try:
+                await store.append_ai_manus_event(session_id, with_error)
+            except KeyError:
+                pass
+            await store.publish("ai_manus_chat_failed", {"session_id": session_id}, session_id=session_id)
+            yield _sse("error", {"error": str(exc)})
+
+    return StreamingResponse(stream(), media_type="text/event-stream")
+
+
+@app.post("/integrations/ai-manus/session/{thread_id}/sandbox-access")
+async def ai_manus_sandbox_access(thread_id: str, request: AiManusSignedUrlRequest | None = None):
+    thread = _ai_manus_thread_or_404(thread_id)
+    remote_session_id = _ai_manus_remote_session_id(thread)
+    await _require_ai_manus_online()
+    expire_minutes = request.expire_minutes if request else 15
+    try:
+        data = await ai_manus_adapter.sandbox_access(remote_session_id, expire_minutes)
+    except AiManusAuthRequired:
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"]) from None
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai-manus sandbox access failed: {exc}") from exc
+
+    response = data if isinstance(data, dict) else {"remote": data}
+    frontend_url = str(ai_manus_adapter.config().get("frontend_url") or "").rstrip("/")
+    if frontend_url:
+        response.setdefault("frontend_url", frontend_url)
+        response.setdefault("interactive_url", f"{frontend_url}/chat/{remote_session_id}")
+        response.setdefault("take_over_url", f"{frontend_url}/chat/{remote_session_id}?vnc=1")
+    response.setdefault("backend_url", ai_manus_adapter.config().get("api_base_url"))
+    if response.get("signed_url"):
+        response.setdefault("websocket_url", response["signed_url"])
+    response.setdefault("status", "ready")
+    response.setdefault("requires_confirmation", True)
+    async with store._lock:
+        await store.publish(
+            "ai_manus_sandbox_access_created",
+            {
+                "session_id": thread_id,
+                "manus_session_id": remote_session_id,
+                "expires_in": response.get("expires_in"),
+            },
+            session_id=thread_id,
+        )
+    return {"session_id": thread_id, "manus_session_id": remote_session_id, **response}
+
+
+@app.get("/integrations/ai-manus/session/{thread_id}/files")
+async def ai_manus_session_files(thread_id: str):
+    thread = _ai_manus_thread_or_404(thread_id)
+    remote_session_id = _ai_manus_remote_session_id(thread)
+    await _require_ai_manus_online()
+    try:
+        files = await ai_manus_adapter.session_files(remote_session_id)
+    except AiManusAuthRequired:
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"]) from None
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai-manus list files failed: {exc}") from exc
+
+    async with store._lock:
+        await store.publish(
+            "ai_manus_files_listed",
+            {
+                "session_id": thread_id,
+                "manus_session_id": remote_session_id,
+                "files_count": _ai_manus_files_count(files),
+            },
+            session_id=thread_id,
+        )
+    return {
+        "session_id": thread_id,
+        "manus_session_id": remote_session_id,
+        "files": files if isinstance(files, list) else files.get("files", []) if isinstance(files, dict) else [],
+        "count": _ai_manus_files_count(files),
+        "status": "ready",
+    }
+
+
+@app.post("/integrations/ai-manus/session/{thread_id}/file-view")
+async def ai_manus_file_view(thread_id: str, request: AiManusFileViewRequest):
+    thread = _ai_manus_thread_or_404(thread_id)
+    remote_session_id = _ai_manus_remote_session_id(thread)
+    file_path = _ai_manus_file_path(request)
+    await _require_ai_manus_online()
+    try:
+        data = await ai_manus_adapter.view_file(remote_session_id, file_path)
+    except AiManusAuthRequired:
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"]) from None
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai-manus file preview failed: {exc}") from exc
+
+    content = data.get("content") if isinstance(data, dict) else None
+    async with store._lock:
+        await store.publish(
+            "ai_manus_file_previewed",
+            {
+                "session_id": thread_id,
+                "manus_session_id": remote_session_id,
+                "file_path": file_path,
+                "content_chars": len(content) if isinstance(content, str) else None,
+            },
+            session_id=thread_id,
+        )
+    return {
+        "session_id": thread_id,
+        "manus_session_id": remote_session_id,
+        "file_id": request.file_id,
+        "path": file_path,
+        "name": Path(file_path).name,
+        "content": content,
+        "text": content if isinstance(content, str) else None,
+        "preview": data,
+    }
+
+
+@app.post("/integrations/ai-manus/files/{file_id}/signed-url")
+async def ai_manus_file_signed_url(file_id: str, request: AiManusSignedUrlRequest | None = None):
+    await _require_ai_manus_online()
+    expire_minutes = request.expire_minutes if request else 15
+    try:
+        data = await ai_manus_adapter.file_signed_url(file_id, expire_minutes)
+    except AiManusAuthRequired:
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"]) from None
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai-manus file download link failed: {exc}") from exc
+
+    response = data if isinstance(data, dict) else {"remote": data}
+    if response.get("signed_url"):
+        response.setdefault("url", response["signed_url"])
+    async with store._lock:
+        await store.publish(
+            "ai_manus_file_download_link_created",
+            {"file_id": file_id, "expires_in": response.get("expires_in")},
+        )
+    return {"file_id": file_id, **response}
+
+
+@app.post("/integrations/ai-manus/session/{session_id}/stop")
+@app.post("/integrations/ai-manus/sessions/{session_id}/stop")
+async def ai_manus_stop_session(session_id: str):
+    try:
+        thread = store.get_ai_manus_thread(session_id)
+        remote_session_id = _ai_manus_remote_session_id(thread)
+    except KeyError:
+        thread = None
+        remote_session_id = session_id
+
+    service = await ai_manus_adapter.status()
+    async with store._lock:
+        await _apply_ai_manus_status(service)
+    if service.status == "auth_required":
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"])
+    if service.status != "online":
+        raise HTTPException(status_code=503, detail=service.detail or "ai-manus backend unavailable")
+    try:
+        data = await ai_manus_adapter.stop_session(remote_session_id)
+    except AiManusAuthRequired:
+        raise HTTPException(status_code=409, detail=ai_manus_adapter.auth_required_payload()["detail"]) from None
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"ai-manus stop session failed: {exc}") from exc
+
+    async with store._lock:
+        if thread:
+            thread.status = "stopped"
+            await store.save_ai_manus_thread(thread)
+        await store.publish("ai_manus_session_stopped", {"session_id": session_id}, session_id=session_id)
+    return {"session_id": session_id, "manus_session_id": remote_session_id, "status": "stopped", "remote": data}
+
+
 @app.get("/integrations/cua/status")
 async def cua_status():
     service = await cua_driver_adapter.status()
@@ -1150,7 +1857,7 @@ async def active_task_confirm(task_id: str):
             session_id=task.source_session_id,
         )
 
-    result = await cua_driver_adapter.insert_text(text)
+    result = await cua_driver_adapter.insert_text(text, surface_hint=_action_target_surface(insert_action))
 
     async with store._lock:
         try:

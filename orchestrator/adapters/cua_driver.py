@@ -318,7 +318,7 @@ class CuaDriverAdapter:
             element_role=element_role,
         )
 
-    async def insert_text(self, text: str) -> CuaInsertResult:
+    async def insert_text(self, text: str, surface_hint: CuaTargetSurface | None = None) -> CuaInsertResult:
         executable = self.executable()
         if not executable:
             return CuaInsertResult(
@@ -338,7 +338,7 @@ class CuaDriverAdapter:
                 text_chars=len(text),
             )
 
-        surface = await self.target_surface()
+        surface = surface_hint if self._usable_surface_hint(surface_hint) else await self.target_surface()
         if not surface.safe or surface.pid is None:
             return CuaInsertResult(
                 ok=False,
@@ -600,6 +600,17 @@ class CuaDriverAdapter:
         if mode == "low_risk_editor":
             return f"{name} editable document is ready; insertion still requires user confirmation."
         return f"{name} is explicitly allowlisted and has an editable text surface; insertion still requires user confirmation."
+
+    def _usable_surface_hint(self, surface: CuaTargetSurface | None) -> bool:
+        if surface is None or not surface.safe or surface.pid is None:
+            return False
+        if not surface.bundle_id or surface.bundle_id in BLOCKED_TARGET_BUNDLES:
+            return False
+        if surface.bundle_id not in self._safe_bundle_ids():
+            return False
+        if surface.window_id is None or surface.element_index is None:
+            return False
+        return True
 
     def _json_payload(self, text: str) -> Any:
         if not text:
