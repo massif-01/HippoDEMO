@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from typing import List, Dict, Any, Optional
 from enum import Enum
 import uuid
@@ -20,6 +20,13 @@ class Step(BaseModel):
 
     def is_done(self) -> bool:
         return self.status == ExecutionStatus.COMPLETED or self.status == ExecutionStatus.FAILED
+
+class ExecutionResult(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    success: bool = False
+    result: str = ""
+    attachments: List[str] = Field(default_factory=list)
 
 class Plan(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
