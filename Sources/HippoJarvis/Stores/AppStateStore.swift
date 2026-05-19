@@ -590,6 +590,38 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    func deleteManusThread(_ thread: ManusThread) async {
+        let deletingCurrentThread = currentManusThread?.id == thread.id
+        if deletingCurrentThread {
+            manusChatTask?.cancel()
+            manusChatTask = nil
+            activeManusChatRunID = nil
+            isManusChatRunning = false
+        }
+
+        do {
+            let response = try await withOrchestratorRecovery(action: "app_state.delete_manus_thread") {
+                try await client.deleteManusThread(sessionID: thread.sessionId)
+            }
+            manusThreads = response.sessions
+            if deletingCurrentThread {
+                currentManusThread = nil
+                manusMessages = []
+                manusPlan = []
+                manusTools = []
+                manusSandboxAccess = nil
+                manusFilesResponse = .empty
+                manusFilePreview = nil
+                manusFileDownloadLink = nil
+            } else if let currentID = currentManusThread?.id {
+                currentManusThread = manusThreads.first { $0.id == currentID } ?? currentManusThread
+            }
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
     private func startManusChatStream(
         route: ManusChatStreamRoute,
         sessionID: String,

@@ -2973,6 +2973,20 @@ async def ai_manus_sessions():
     return {"status": "online", "remote": data, "sessions": local_threads, "local_threads": local_threads}
 
 
+@app.delete("/integrations/ai-manus/session/{session_id}")
+@app.delete("/integrations/ai-manus/sessions/{session_id}")
+@app.delete("/chat/session/{session_id}")
+async def ai_manus_delete_session(session_id: str):
+    async with store._lock:
+        try:
+            thread = await store.delete_ai_manus_thread(session_id)
+        except KeyError:
+            raise HTTPException(status_code=404, detail=f"Unknown ai-manus thread: {session_id}") from None
+        await store.publish("ai_manus_thread_deleted", _ai_manus_thread_summary(thread), session_id=session_id)
+        local_threads = [_ai_manus_thread_summary(item) for item in store.list_ai_manus_threads()]
+        return {"status": "deleted", "sessions": local_threads, "local_threads": local_threads}
+
+
 @app.get("/integrations/ai-manus/session/{session_id}")
 @app.get("/integrations/ai-manus/session/{session_id}/detail")
 @app.get("/integrations/ai-manus/sessions/{session_id}")

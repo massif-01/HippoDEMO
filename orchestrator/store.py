@@ -259,6 +259,13 @@ class OrchestratorStore:
         write_json(AI_MANUS_THREAD_DIR / f"{thread.session_id}.json", to_dict(thread))
         return thread
 
+    async def delete_ai_manus_thread(self, session_id: str) -> AiManusThread:
+        thread = self.get_ai_manus_thread(session_id)
+        path = AI_MANUS_THREAD_DIR / f"{session_id}.json"
+        if path.exists() and path.is_file():
+            path.unlink()
+        return thread
+
     async def append_ai_manus_message(self, session_id: str, message: AiManusThreadMessage) -> AiManusThread:
         thread = self.get_ai_manus_thread(session_id)
         thread.messages.append(message)

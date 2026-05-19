@@ -131,7 +131,7 @@ private struct DashboardSidebar: View {
                             .foregroundStyle(.secondary)
                             .padding(.vertical, 4)
                     } else {
-                        ForEach(Array(store.manusThreads.prefix(8))) { thread in
+                        ForEach(store.manusThreads) { thread in
                             manusThreadRow(thread)
                         }
                     }
@@ -257,40 +257,61 @@ private struct DashboardSidebar: View {
     }
 
     private func manusThreadRow(_ thread: ManusThread) -> some View {
-        Button {
-            route = .chat
-            Task { await store.loadManusThread(thread) }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: manusThreadIcon(thread))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(manusThreadColor(thread))
-                    .frame(width: 20)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(manusThreadTitle(thread))
-                        .font(.system(size: 12, weight: store.currentManusThread?.id == thread.id ? .semibold : .medium))
-                        .lineLimit(1)
-                    Text(manusThreadSubtitle(thread))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+        HStack(spacing: 4) {
+            Button {
+                route = .chat
+                Task { await store.loadManusThread(thread) }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: manusThreadIcon(thread))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(manusThreadColor(thread))
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(manusThreadTitle(thread))
+                            .font(.system(size: 12, weight: store.currentManusThread?.id == thread.id ? .semibold : .medium))
+                            .lineLimit(1)
+                        Text(manusThreadSubtitle(thread))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    if let unread = thread.unreadMessageCount, unread > 0 {
+                        Text("\(unread)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 18, minHeight: 18)
+                            .background(Color.red.opacity(0.85), in: Circle())
+                    }
                 }
-                Spacer(minLength: 0)
-                if let unread = thread.unreadMessageCount, unread > 0 {
-                    Text("\(unread)")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 18, minHeight: 18)
-                        .background(Color.red.opacity(0.85), in: Circle())
-                }
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 5)
-            .background(store.currentManusThread?.id == thread.id ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .contentShape(Rectangle())
+            .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.98, overlayOpacity: 0.10))
+            .accessibilityLabel(manusThreadTitle(thread))
+
+            Button(role: .destructive) {
+                Task { await store.deleteManusThread(thread) }
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 6, pressedScale: 0.92, overlayOpacity: 0.18))
+            .foregroundStyle(.secondary)
+            .help("Delete task")
+            .accessibilityLabel("Delete \(manusThreadTitle(thread))")
         }
-        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.98, overlayOpacity: 0.10))
-        .accessibilityLabel(manusThreadTitle(thread))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .background(store.currentManusThread?.id == thread.id ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contextMenu {
+            Button(role: .destructive) {
+                Task { await store.deleteManusThread(thread) }
+            } label: {
+                Label("Delete Task", systemImage: "trash")
+            }
+        }
     }
 
     private func manusThreadTitle(_ thread: ManusThread) -> String {
