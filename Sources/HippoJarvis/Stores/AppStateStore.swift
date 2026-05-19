@@ -362,6 +362,12 @@ final class AppStateStore: ObservableObject {
                 try await client.updateAiManusConfig(request)
             }
             aiManusConfig = config
+            if let runtimeRestart = config.runtimeRestart {
+                aiManusRuntimeLastCommand = runtimeRestart
+                aiManusRuntimeLogs = (try? await withOrchestratorRecovery(action: "app_state.update_ai_manus.runtime_logs") {
+                    try await client.aiManusRuntimeLogs(limit: 80)
+                }) ?? aiManusRuntimeLogs
+            }
             do {
                 aiManusStatus = try await withOrchestratorRecovery(action: "app_state.update_ai_manus.status") {
                     try await client.aiManusStatus()
@@ -578,6 +584,38 @@ final class AppStateStore: ObservableObject {
                 try await client.manusSessions().sessions
             }) ?? manusThreads
             self.currentManusThread = manusThreads.first { $0.id == currentManusThread.id } ?? currentManusThread
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func deleteManusThread(_ thread: ManusThread) async {
+        let deletingCurrentThread = currentManusThread?.id == thread.id
+        if deletingCurrentThread {
+            manusChatTask?.cancel()
+            manusChatTask = nil
+            activeManusChatRunID = nil
+            isManusChatRunning = false
+        }
+
+        do {
+            let response = try await withOrchestratorRecovery(action: "app_state.delete_manus_thread") {
+                try await client.deleteManusThread(sessionID: thread.sessionId)
+            }
+            manusThreads = response.sessions
+            if deletingCurrentThread {
+                currentManusThread = nil
+                manusMessages = []
+                manusPlan = []
+                manusTools = []
+                manusSandboxAccess = nil
+                manusFilesResponse = .empty
+                manusFilePreview = nil
+                manusFileDownloadLink = nil
+            } else if let currentID = currentManusThread?.id {
+                currentManusThread = manusThreads.first { $0.id == currentID } ?? currentManusThread
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription

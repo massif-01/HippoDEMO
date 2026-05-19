@@ -1,3 +1,4 @@
+import asyncio
 from typing import Optional
 from app.domain.external.browser import Browser
 from app.domain.services.tools.base import BaseToolkit
@@ -23,6 +24,17 @@ class BrowserToolkit(BaseToolkit):
         """View content of the current browser page. Use for checking the latest state of previously opened pages.
         """
         return await self.browser.view_page()
+
+    @tool(parse_docstring=True)
+    async def browser_wait(self, seconds: float = 1.0) -> ToolResult:
+        """Wait briefly before checking browser state again. Use after navigation or clicks when page updates need time.
+
+        Args:
+            seconds: Wait duration in seconds.
+        """
+        wait_seconds = max(0.0, min(float(seconds), 30.0))
+        await asyncio.sleep(wait_seconds)
+        return ToolResult(success=True, message=f"Waited {wait_seconds:g} seconds")
     
     @tool(parse_docstring=True)
     async def browser_navigate(self, url: str) -> ToolResult:
@@ -164,4 +176,4 @@ class BrowserToolkit(BaseToolkit):
         Args:
             max_lines: (Optional) Maximum number of log lines to return.
         """
-        return await self.browser.console_view(max_lines) 
+        return await self.browser.console_view(max_lines)

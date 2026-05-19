@@ -360,6 +360,10 @@ struct OrchestratorClient {
         try await getWrapped(path: "integrations/ai-manus/sessions")
     }
 
+    func deleteManusThread(sessionID: String) async throws -> ManusThreadsResponse {
+        try await delete(path: "integrations/ai-manus/session/\(sessionID)")
+    }
+
     func manusThreadDetail(sessionID: String) async throws -> ManusThreadDetail {
         try await getWrapped(path: "integrations/ai-manus/session/\(sessionID)/detail")
     }
@@ -681,6 +685,24 @@ struct OrchestratorClient {
             let snapshot = try decoder.decode(AppSnapshot.self, from: data)
             AppLog.event(action: "http.delete", path: path, status: httpStatus(response), startedAt: startedAt)
             return snapshot
+        } catch {
+            AppLog.event(action: "http.delete", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
+    }
+
+    private func delete<T: Decodable>(path: String) async throws -> T {
+        let startedAt = AppLog.start()
+        let url = baseURL.appending(path: path)
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response, data: data)
+            let value = try decoder.decode(T.self, from: data)
+            AppLog.event(action: "http.delete", path: path, status: httpStatus(response), startedAt: startedAt)
+            return value
         } catch {
             AppLog.event(action: "http.delete", path: path, status: "error", startedAt: startedAt, error: error)
             throw error

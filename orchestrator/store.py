@@ -259,6 +259,13 @@ class OrchestratorStore:
         write_json(AI_MANUS_THREAD_DIR / f"{thread.session_id}.json", to_dict(thread))
         return thread
 
+    async def delete_ai_manus_thread(self, session_id: str) -> AiManusThread:
+        thread = self.get_ai_manus_thread(session_id)
+        path = AI_MANUS_THREAD_DIR / f"{session_id}.json"
+        if path.exists() and path.is_file():
+            path.unlink()
+        return thread
+
     async def append_ai_manus_message(self, session_id: str, message: AiManusThreadMessage) -> AiManusThread:
         thread = self.get_ai_manus_thread(session_id)
         thread.messages.append(message)
@@ -269,8 +276,10 @@ class OrchestratorStore:
     async def append_ai_manus_event(self, session_id: str, event: AiManusThreadEvent) -> AiManusThread:
         thread = self.get_ai_manus_thread(session_id)
         thread.events.append(event)
-        if event.data.get("status"):
+        if event.event in {"session", "thread"} and event.data.get("status"):
             thread.status = str(event.data["status"])
+        elif event.event == "done":
+            thread.status = "completed"
         return await self.save_ai_manus_thread(thread)
 
 

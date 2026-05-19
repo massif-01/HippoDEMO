@@ -244,7 +244,7 @@ struct DashboardChatView: View {
 
     private var composer: some View {
         VStack(spacing: 12) {
-            DashboardComposerTextView(text: $draft, placeholder: composerPlaceholder, focusSeed: composerFocusSeed)
+            DashboardComposerTextView(text: $draft, placeholder: composerPlaceholder, focusSeed: composerFocusSeed, onCommandReturn: sendDraft)
                 .frame(minHeight: 56, maxHeight: 80)
 
             HStack(spacing: 6) {
@@ -253,6 +253,13 @@ struct DashboardChatView: View {
                 Spacer()
                 roundControl("livephoto") { appendComposerToken("[live audio]") }
                 roundControl("mic.fill") { appendComposerToken("[voice note]") }
+                Text("⌘↵")
+                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .foregroundStyle(canSend ? .secondary : .tertiary)
+                    .padding(.horizontal, 6)
+                    .frame(height: 22)
+                    .background(HippoTheme.subtleFill, in: Capsule())
+                    .accessibilityHidden(true)
                 Button {
                     sendDraft()
                 } label: {
@@ -263,6 +270,8 @@ struct DashboardChatView: View {
                 .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 999, pressedScale: 0.88, overlayOpacity: 0.16))
                 .foregroundStyle(canSend ? Color.accentColor : .secondary)
                 .disabled(!canSend)
+                .keyboardShortcut(.return, modifiers: .command)
+                .help("Send")
             }
         }
         .onChange(of: store.isManusChatRunning) { _, running in
@@ -915,8 +924,8 @@ struct DashboardChatView: View {
     }
 
     private func sendDraft() {
+        guard canSend else { return }
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else { return }
         draft = ""
         composerFocusSeed += 1
         Task { await store.sendChatMessage(text) }
@@ -1895,6 +1904,7 @@ private struct DashboardComposerTextView: NSViewRepresentable {
     @Binding var text: String
     var placeholder: String
     var focusSeed: Int
+    var onCommandReturn: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(text: $text, focusSeed: focusSeed)
@@ -1915,6 +1925,7 @@ private struct DashboardComposerTextView: NSViewRepresentable {
         view.placeholderLabel.isHidden = !text.isEmpty
         view.textView.isEditable = true
         view.textView.isSelectable = true
+        view.textView.onCommandReturn = onCommandReturn
         if context.coordinator.lastFocusSeed != focusSeed {
             context.coordinator.lastFocusSeed = focusSeed
             DispatchQueue.main.async {
@@ -1940,7 +1951,7 @@ private struct DashboardComposerTextView: NSViewRepresentable {
 
     final class ComposerContainerView: NSView {
         let scrollView = NSScrollView()
-        let textView = NSTextView()
+        let textView = ComposerTextView()
         let placeholderLabel = ClickThroughLabel(labelWithString: "")
 
         override var isFlipped: Bool { true }
@@ -2014,6 +2025,19 @@ private struct DashboardComposerTextView: NSViewRepresentable {
             placeholderLabel.isEditable = false
             placeholderLabel.isSelectable = false
             placeholderLabel.lineBreakMode = .byTruncatingTail
+        }
+    }
+
+    final class ComposerTextView: NSTextView {
+        var onCommandReturn: (() -> Void)?
+
+        override func keyDown(with event: NSEvent) {
+            let isReturn = event.keyCode == 36 || event.keyCode == 76
+            if isReturn, event.modifierFlags.contains(.command) {
+                onCommandReturn?()
+                return
+            }
+            super.keyDown(with: event)
         }
     }
 

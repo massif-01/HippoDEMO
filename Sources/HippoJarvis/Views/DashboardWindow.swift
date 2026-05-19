@@ -101,6 +101,7 @@ struct DashboardWindow: View {
 private struct DashboardSidebar: View {
     @EnvironmentObject private var store: AppStateStore
     @Binding var route: DashboardRouteID
+    @State private var threadPendingDeletion: ManusThread?
 
     var body: some View {
         List(selection: routeSelection) {
@@ -131,7 +132,7 @@ private struct DashboardSidebar: View {
                             .foregroundStyle(.secondary)
                             .padding(.vertical, 4)
                     } else {
-                        ForEach(Array(store.manusThreads.prefix(8))) { thread in
+                        ForEach(store.manusThreads) { thread in
                             manusThreadRow(thread)
                         }
                     }
@@ -147,6 +148,18 @@ private struct DashboardSidebar: View {
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             footer
+        }
+        .alert("Delete Task?", isPresented: deleteThreadDialogPresented) {
+            Button("Delete", role: .destructive) {
+                deletePendingManusThread()
+            }
+            Button("Cancel", role: .cancel) {
+                threadPendingDeletion = nil
+            }
+        } message: {
+            if let threadPendingDeletion {
+                Text("This removes \(manusThreadTitle(threadPendingDeletion)) from All Tasks.")
+            }
         }
     }
 
@@ -257,40 +270,77 @@ private struct DashboardSidebar: View {
     }
 
     private func manusThreadRow(_ thread: ManusThread) -> some View {
-        Button {
-            route = .chat
-            Task { await store.loadManusThread(thread) }
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: manusThreadIcon(thread))
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(manusThreadColor(thread))
-                    .frame(width: 20)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(manusThreadTitle(thread))
-                        .font(.system(size: 12, weight: store.currentManusThread?.id == thread.id ? .semibold : .medium))
-                        .lineLimit(1)
-                    Text(manusThreadSubtitle(thread))
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+        HStack(spacing: 4) {
+            Button {
+                route = .chat
+                Task { await store.loadManusThread(thread) }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: manusThreadIcon(thread))
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(manusThreadColor(thread))
+                        .frame(width: 20)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(manusThreadTitle(thread))
+                            .font(.system(size: 12, weight: store.currentManusThread?.id == thread.id ? .semibold : .medium))
+                            .lineLimit(1)
+                        Text(manusThreadSubtitle(thread))
+                            .font(.system(size: 10))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                    if let unread = thread.unreadMessageCount, unread > 0 {
+                        Text("\(unread)")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(minWidth: 18, minHeight: 18)
+                            .background(Color.red.opacity(0.85), in: Circle())
+                    }
                 }
-                Spacer(minLength: 0)
-                if let unread = thread.unreadMessageCount, unread > 0 {
-                    Text("\(unread)")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(minWidth: 18, minHeight: 18)
-                        .background(Color.red.opacity(0.85), in: Circle())
-                }
+                .contentShape(Rectangle())
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 5)
-            .background(store.currentManusThread?.id == thread.id ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .contentShape(Rectangle())
+            .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.98, overlayOpacity: 0.10))
+            .accessibilityLabel(manusThreadTitle(thread))
+
+            Button {
+                threadPendingDeletion = thread
+            } label: {
+                Image(systemName: "trash")
+                    .font(.system(size: 11, weight: .semibold))
+                    .frame(width: 22, height: 22)
+            }
+            .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 6, pressedScale: 0.92, overlayOpacity: 0.18))
+            .foregroundStyle(.secondary)
+            .help("Delete task")
+            .accessibilityLabel("Delete \(manusThreadTitle(thread))")
         }
-        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.98, overlayOpacity: 0.10))
-        .accessibilityLabel(manusThreadTitle(thread))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .background(store.currentManusThread?.id == thread.id ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .contextMenu {
+            Button(role: .destructive) {
+                threadPendingDeletion = thread
+            } label: {
+                Label("Delete Task", systemImage: "trash")
+            }
+        }
+    }
+
+    private var deleteThreadDialogPresented: Binding<Bool> {
+        Binding {
+            threadPendingDeletion != nil
+        } set: { presented in
+            if !presented {
+                threadPendingDeletion = nil
+            }
+        }
+    }
+
+    private func deletePendingManusThread() {
+        guard let thread = threadPendingDeletion else { return }
+        threadPendingDeletion = nil
+        Task { await store.deleteManusThread(thread) }
     }
 
     private func manusThreadTitle(_ thread: ManusThread) -> String {
@@ -1829,7 +1879,8 @@ private struct DashboardSettingsView: View {
         let action = command.action ?? "runtime"
         let status = command.status ?? "unknown"
         let pid = command.pid.map { " - pid \($0)" } ?? ""
-        return "\(action) \(status)\(pid)"
+        let detail = command.detail.map { " - \($0)" } ?? ""
+        return "\(action) \(status)\(pid)\(detail)"
     }
 
     private var aiManusRuntimeLogLines: [String] {
