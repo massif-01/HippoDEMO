@@ -17,6 +17,7 @@ final class SkillStore {
     }
 
     func persist(_ skills: [SkillRecord]) {
+        let startedAt = AppLog.start()
         do {
             try fileManager.createDirectory(at: skillsDirectory, withIntermediateDirectories: true)
             let encoder = JSONEncoder()
@@ -31,8 +32,23 @@ final class SkillStore {
                     encoding: .utf8
                 )
             }
+            AppLog.event(
+                action: "skill_store.persist",
+                path: indexURL.path,
+                status: "ok",
+                startedAt: startedAt,
+                eventCount: skills.count
+            )
         } catch {
             NSLog("SkillStore persist failed: \(error.localizedDescription)")
+            AppLog.event(
+                action: "skill_store.persist",
+                path: indexURL.path,
+                status: "error",
+                startedAt: startedAt,
+                error: error,
+                eventCount: skills.count
+            )
         }
     }
 

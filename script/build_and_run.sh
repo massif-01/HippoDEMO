@@ -45,6 +45,37 @@ verify_launch() {
   exit 1
 }
 
+orchestrator_python() {
+  for candidate in \
+    "$ROOT_DIR/orchestrator-runtime/bin/python" \
+    "/opt/anaconda3/bin/python" \
+    "/opt/homebrew/bin/python3" \
+    "/usr/bin/python3"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+start_orchestrator_for_verify() {
+  if curl -fsS http://127.0.0.1:8787/health >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local python
+  python="$(orchestrator_python)"
+  mkdir -p "$ROOT_DIR/.runtime"
+  HIPPODEMO_ROOT="$ROOT_DIR" \
+  HIPPODEMO_PYTHON="$python" \
+  OWNSCRIBE_PYTHON="$python" \
+  PYTHONPATH="$ROOT_DIR" \
+  nohup "$python" -m uvicorn orchestrator.main:app --host 127.0.0.1 --port 8787 \
+    >>"$ROOT_DIR/.runtime/orchestrator-app.log" 2>&1 &
+  echo "$!" >"$ROOT_DIR/.runtime/orchestrator-app.pid"
+}
+
 case "$MODE" in
   --restart-no-build|restart-no-build)
     if [[ ! -x "$APP_BINARY" ]]; then
@@ -92,6 +123,11 @@ cat >"$INFO_PLIST" <<PLIST
   <string>NSApplication</string>
   <key>NSMicrophoneUsageDescription</key>
   <string>HippoJarvis records meeting audio from the microphone when Jarvis is enabled.</string>
+  <key>NSAppTransportSecurity</key>
+  <dict>
+    <key>NSAllowsLocalNetworking</key>
+    <true/>
+  </dict>
 </dict>
 </plist>
 PLIST
@@ -118,6 +154,7 @@ case "$MODE" in
     /usr/bin/log stream --info --style compact --predicate "subsystem == \"$BUNDLE_ID\""
     ;;
   --verify|verify)
+    start_orchestrator_for_verify
     open_app
     verify_launch
     ;;

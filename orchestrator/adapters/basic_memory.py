@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -10,6 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..logging_config import log_event
 from ..models import ServiceStatus, now_iso
 from ..store import BASIC_MEMORY_DIR, write_json
 
@@ -22,6 +24,7 @@ BASIC_MEMORY_LEDGER_PATH = BASIC_MEMORY_DIR / "ledger.json"
 BASIC_MEMORY_PROJECT_NAME = "hippo"
 BUNDLED_RUNTIME_DIR = PROJECT_DIR / "orchestrator-runtime"
 DEV_RUNTIME_DIR = PROJECT_DIR / ".runtime" / "basic-memory-runtime"
+logger = logging.getLogger("orchestrator.adapters.basic_memory")
 
 
 def _uv_path() -> str | None:
@@ -519,6 +522,16 @@ class BasicMemoryAdapter:
         command.extend(args)
         env = self._env()
         try:
+            log_event(
+                logger,
+                "adapter_subprocess_started",
+                adapter="basic-memory",
+                runtime_kind=runtime.kind,
+                command_args=args,
+                expect_json=expect_json,
+                timeout_seconds=timeout_seconds,
+                stdin_chars=len(input_text) if input_text is not None else 0,
+            )
             result = subprocess.run(
                 command,
                 input=input_text,
@@ -531,8 +544,26 @@ class BasicMemoryAdapter:
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
+            log_event(
+                logger,
+                "adapter_subprocess_timeout",
+                adapter="basic-memory",
+                runtime_kind=runtime.kind,
+                command_args=args[:3],
+                timeout_seconds=timeout_seconds,
+            )
             raise BasicMemoryCommandError(f"Command timed out after {timeout_seconds}s: {' '.join(command[:5])}") from exc
 
+        log_event(
+            logger,
+            "adapter_subprocess_completed",
+            adapter="basic-memory",
+            runtime_kind=runtime.kind,
+            command_args=args[:3],
+            returncode=result.returncode,
+            stdout_chars=len(result.stdout or ""),
+            stderr_chars=len(result.stderr or ""),
+        )
         if result.returncode != 0:
             detail = self._safe_error(result.stderr or result.stdout or f"exit={result.returncode}")
             raise BasicMemoryCommandError(detail)

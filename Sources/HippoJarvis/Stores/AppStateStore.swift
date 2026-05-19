@@ -15,6 +15,7 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var aiManusStatus: AiManusStatus = .empty
     @Published private(set) var aiManusRuntimeLastCommand: AiManusRuntimeCommandResponse?
     @Published private(set) var aiManusRuntimeLogs: AiManusRuntimeLogsResponse = .empty
+    @Published private(set) var aiManusModelValidation: ModelValidationResponse?
     @Published private(set) var basicMemoryConfig: BasicMemoryConfig = .empty
     @Published private(set) var basicMemoryStatus: BasicMemoryStatus = .empty
     @Published private(set) var basicMemorySearch: BasicMemorySearchResponse = .empty
@@ -39,6 +40,7 @@ final class AppStateStore: ObservableObject {
     @Published private(set) var isLoadingManusFileDownloadLink = false
     @Published private(set) var isRunningAiManusRuntimeCommand = false
     @Published private(set) var isRunningBasicMemoryCommand = false
+    @Published private(set) var isManusChatRunning = false
     @Published private(set) var isBusy = false
     @Published var language: AppLanguage {
         didSet {
@@ -51,8 +53,16 @@ final class AppStateStore: ObservableObject {
     private let launcher = OrchestratorLauncher.shared
     private let skillStore = SkillStore()
     private var bootstrapped = false
+    private var isBootstrapping = false
+    private var isRecoveringOrchestrator = false
     private var eventsTask: Task<Void, Never>?
     private var manusChatTask: Task<Void, Never>?
+    private var activeManusChatRunID: UUID?
+
+    private enum ManusChatStreamRoute {
+        case directManus
+        case hippoChat
+    }
 
     init() {
         let storedLanguage = UserDefaults.standard.string(forKey: Self.languageKey)
@@ -99,11 +109,21 @@ final class AppStateStore: ObservableObject {
     }
 
     func bootstrap() async {
-        guard !bootstrapped else { return }
-        bootstrapped = true
+        let startedAt = AppLog.start()
+        if bootstrapped { return }
+        if isBootstrapping {
+            while isBootstrapping && !bootstrapped {
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            return
+        }
+        isBootstrapping = true
+        defer { isBootstrapping = false }
         await ensureOrchestrator()
         await refresh()
         startEvents()
+        bootstrapped = true
+        AppLog.event(action: "app_state.bootstrap", status: "ok", startedAt: startedAt)
     }
 
     func refresh() async {
@@ -123,9 +143,15 @@ final class AppStateStore: ObservableObject {
         defer { isBusy = false }
 
         do {
-            ownscribeConfig = try await client.ownscribeConfig()
-            ownscribeDevices = try await client.ownscribeAudioDevices()
-            ownscribePreflight = try await client.ownscribePreflight(network: networkPreflight)
+            ownscribeConfig = try await withOrchestratorRecovery(action: "app_state.refresh_ownscribe.config") {
+                try await client.ownscribeConfig()
+            }
+            ownscribeDevices = try await withOrchestratorRecovery(action: "app_state.refresh_ownscribe.devices") {
+                try await client.ownscribeAudioDevices()
+            }
+            ownscribePreflight = try await withOrchestratorRecovery(action: "app_state.refresh_ownscribe.preflight") {
+                try await client.ownscribePreflight(network: networkPreflight)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -137,11 +163,32 @@ final class AppStateStore: ObservableObject {
         defer { isBusy = false }
 
         do {
-            var config = try await client.aiManusConfig()
-            aiManusStatus = try await client.aiManusStatus()
-            config.status = aiManusStatus.status
+            var config = try await withOrchestratorRecovery(action: "app_state.refresh_manus.config") {
+                try await client.aiManusConfig()
+            }
             aiManusConfig = config
-            manusThreads = try await client.manusSessions().sessions
+            do {
+                aiManusStatus = try await withOrchestratorRecovery(action: "app_state.refresh_manus.status") {
+                    try await client.aiManusStatus()
+                }
+                config.status = aiManusStatus.status
+                aiManusConfig = config
+            } catch {
+                if isOrchestratorUnavailable(error) {
+                    throw error
+                }
+                AppLog.event(action: "app_state.refresh_manus.status", status: "error", error: error)
+            }
+            do {
+                manusThreads = try await withOrchestratorRecovery(action: "app_state.refresh_manus.sessions") {
+                    try await client.manusSessions().sessions
+                }
+            } catch {
+                if isOrchestratorUnavailable(error) {
+                    throw error
+                }
+                AppLog.event(action: "app_state.refresh_manus.sessions", status: "error", error: error)
+            }
             if let currentManusThread {
                 self.currentManusThread = manusThreads.first { $0.id == currentManusThread.id } ?? currentManusThread
             }
@@ -156,10 +203,16 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemoryConfig = try await client.basicMemoryConfig()
-            basicMemoryStatus = try await client.basicMemoryStatus()
+            basicMemoryConfig = try await withOrchestratorRecovery(action: "app_state.refresh_basic_memory.config") {
+                try await client.basicMemoryConfig()
+            }
+            basicMemoryStatus = try await withOrchestratorRecovery(action: "app_state.refresh_basic_memory.status") {
+                try await client.basicMemoryStatus()
+            }
             applyBasicMemoryService(basicMemoryStatus.service)
-            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            basicMemoryRecent = (try? await withOrchestratorRecovery(action: "app_state.refresh_basic_memory.recent") {
+                try await client.recentBasicMemoryNotes(limit: 8)
+            }) ?? basicMemoryRecent
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -171,10 +224,16 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemoryStatus = try await client.setupBasicMemory()
-            basicMemoryConfig = try await client.basicMemoryConfig()
+            basicMemoryStatus = try await withOrchestratorRecovery(action: "app_state.setup_basic_memory") {
+                try await client.setupBasicMemory()
+            }
+            basicMemoryConfig = try await withOrchestratorRecovery(action: "app_state.setup_basic_memory.config") {
+                try await client.basicMemoryConfig()
+            }
             applyBasicMemoryService(basicMemoryStatus.service)
-            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            basicMemoryRecent = (try? await withOrchestratorRecovery(action: "app_state.setup_basic_memory.recent") {
+                try await client.recentBasicMemoryNotes(limit: 8)
+            }) ?? basicMemoryRecent
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -189,7 +248,9 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemorySearch = try await client.searchBasicMemory(query: trimmed, limit: 8)
+            basicMemorySearch = try await withOrchestratorRecovery(action: "app_state.search_basic_memory") {
+                try await client.searchBasicMemory(query: trimmed, limit: 8)
+            }
             if let first = basicMemorySearch.results.first {
                 await loadBasicMemoryNotePreview(first)
             }
@@ -204,7 +265,9 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemoryRecent = try await client.recentBasicMemoryNotes(limit: 8)
+            basicMemoryRecent = try await withOrchestratorRecovery(action: "app_state.load_basic_memory_recent") {
+                try await client.recentBasicMemoryNotes(limit: 8)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -295,10 +358,22 @@ final class AppStateStore: ObservableObject {
                 maxTokens: maxTokens,
                 extraHeaders: extraHeaders
             )
-            var config = try await client.updateAiManusConfig(request)
-            aiManusStatus = try await client.aiManusStatus()
-            config.status = aiManusStatus.status
+            var config = try await withOrchestratorRecovery(action: "app_state.update_ai_manus") {
+                try await client.updateAiManusConfig(request)
+            }
             aiManusConfig = config
+            do {
+                aiManusStatus = try await withOrchestratorRecovery(action: "app_state.update_ai_manus.status") {
+                    try await client.aiManusStatus()
+                }
+                config.status = aiManusStatus.status
+                aiManusConfig = config
+            } catch {
+                if isOrchestratorUnavailable(error) {
+                    throw error
+                }
+                AppLog.event(action: "app_state.update_ai_manus.status", status: "error", error: error)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -325,7 +400,23 @@ final class AppStateStore: ObservableObject {
 
     func refreshAiManusRuntimeLogs() async {
         do {
-            aiManusRuntimeLogs = try await client.aiManusRuntimeLogs(limit: 80)
+            aiManusRuntimeLogs = try await withOrchestratorRecovery(action: "app_state.refresh_ai_manus_runtime_logs") {
+                try await client.aiManusRuntimeLogs(limit: 80)
+            }
+            lastError = nil
+        } catch {
+            lastError = error.localizedDescription
+        }
+    }
+
+    func validateAiManusModel() async {
+        isBusy = true
+        defer { isBusy = false }
+
+        do {
+            aiManusModelValidation = try await withOrchestratorRecovery(action: "app_state.validate_ai_manus_model") {
+                try await client.validateAiManusModel()
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -337,8 +428,12 @@ final class AppStateStore: ObservableObject {
         defer { isBusy = false }
 
         do {
-            let response = try await client.createManusSession()
-            manusThreads = try await client.manusSessions().sessions
+            let response = try await withOrchestratorRecovery(action: "app_state.new_manus_thread") {
+                try await client.createManusSession()
+            }
+            manusThreads = try await withOrchestratorRecovery(action: "app_state.new_manus_thread.sessions") {
+                try await client.manusSessions().sessions
+            }
             try await loadManusThreadWithoutBusy(response.sessionId)
             lastError = nil
         } catch {
@@ -351,8 +446,12 @@ final class AppStateStore: ObservableObject {
         defer { isBusy = false }
 
         do {
-            let response = try await client.createChatSession()
-            manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
+            let response = try await withOrchestratorRecovery(action: "app_state.new_chat_thread") {
+                try await client.createChatSession()
+            }
+            manusThreads = (try? await withOrchestratorRecovery(action: "app_state.new_chat_thread.sessions") {
+                try await client.manusSessions().sessions
+            }) ?? manusThreads
             try await loadManusThreadWithoutBusy(response.sessionId)
             lastError = nil
         } catch {
@@ -379,31 +478,36 @@ final class AppStateStore: ObservableObject {
     func sendManusMessage(_ content: String, attachments: [JSONValue]? = nil) async {
         let message = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
+        guard !isManusChatRunning else {
+            lastError = "A Manus response is still running. Stop it before sending another message."
+            return
+        }
 
         manusChatTask?.cancel()
+        isManusChatRunning = true
         isBusy = true
-        defer { isBusy = false }
 
         do {
             let sessionID: String
             if let currentManusThread {
                 sessionID = currentManusThread.id
             } else {
-                let response = try await client.createManusSession()
+                let response = try await withOrchestratorRecovery(action: "app_state.send_manus.create_session") {
+                    try await client.createManusSession()
+                }
                 sessionID = response.sessionId
-                manusThreads = try await client.manusSessions().sessions
+                manusThreads = try await withOrchestratorRecovery(action: "app_state.send_manus.sessions") {
+                    try await client.manusSessions().sessions
+                }
                 try await loadManusThreadWithoutBusy(sessionID)
             }
 
             appendLocalManusMessage(role: "user", content: message, attachments: attachments)
-            try await client.streamManusChat(sessionID: sessionID, message: message, attachments: attachments) { event in
-                await MainActor.run {
-                    self.applyManusStreamEvent(event)
-                }
-            }
-            manusThreads = try await client.manusSessions().sessions
-            lastError = nil
+            isBusy = false
+            startManusChatStream(route: .directManus, sessionID: sessionID, message: message, attachments: attachments)
         } catch {
+            isBusy = false
+            isManusChatRunning = false
             lastError = error.localizedDescription
         }
     }
@@ -411,31 +515,36 @@ final class AppStateStore: ObservableObject {
     func sendChatMessage(_ content: String, attachments: [JSONValue]? = nil) async {
         let message = content.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return }
+        guard !isManusChatRunning else {
+            lastError = "A Manus response is still running. Stop it before sending another message."
+            return
+        }
 
         manusChatTask?.cancel()
+        isManusChatRunning = true
         isBusy = true
-        defer { isBusy = false }
 
         do {
             let sessionID: String
             if let currentManusThread, !currentManusThread.id.hasPrefix("local-") {
                 sessionID = currentManusThread.id
             } else {
-                let response = try await client.createChatSession()
+                let response = try await withOrchestratorRecovery(action: "app_state.send_chat.create_session") {
+                    try await client.createChatSession()
+                }
                 sessionID = response.sessionId
-                manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
+                manusThreads = (try? await withOrchestratorRecovery(action: "app_state.send_chat.sessions") {
+                    try await client.manusSessions().sessions
+                }) ?? manusThreads
                 try await loadManusThreadWithoutBusy(sessionID)
             }
 
             appendLocalManusMessage(role: "user", content: message, attachments: attachments)
-            try await client.streamChatMessage(sessionID: sessionID, message: message, attachments: attachments) { event in
-                await MainActor.run {
-                    self.applyManusStreamEvent(event)
-                }
-            }
-            manusThreads = (try? await client.manusSessions().sessions) ?? manusThreads
-            lastError = nil
+            isBusy = false
+            startManusChatStream(route: .hippoChat, sessionID: sessionID, message: message, attachments: attachments)
         } catch {
+            isBusy = false
+            isManusChatRunning = false
             lastError = error.localizedDescription
         }
     }
@@ -455,21 +564,94 @@ final class AppStateStore: ObservableObject {
     }
 
     func stopManusThread() async {
-        guard let currentManusThread else { return }
         manusChatTask?.cancel()
         manusChatTask = nil
-
-        isBusy = true
-        defer { isBusy = false }
+        activeManusChatRunID = nil
+        isManusChatRunning = false
+        guard let currentManusThread else { return }
 
         do {
-            try await client.stopManusSession(sessionID: currentManusThread.id)
-            manusThreads = try await client.manusSessions().sessions
+            try await withOrchestratorRecovery(action: "app_state.stop_manus") {
+                try await client.stopManusSession(sessionID: currentManusThread.id)
+            }
+            manusThreads = (try? await withOrchestratorRecovery(action: "app_state.stop_manus.sessions") {
+                try await client.manusSessions().sessions
+            }) ?? manusThreads
             self.currentManusThread = manusThreads.first { $0.id == currentManusThread.id } ?? currentManusThread
             lastError = nil
         } catch {
             lastError = error.localizedDescription
         }
+    }
+
+    private func startManusChatStream(
+        route: ManusChatStreamRoute,
+        sessionID: String,
+        message: String,
+        attachments: [JSONValue]?
+    ) {
+        let runID = UUID()
+        activeManusChatRunID = runID
+        isManusChatRunning = true
+        lastError = nil
+
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.activeManusChatRunID == runID {
+                    self.isManusChatRunning = false
+                    self.manusChatTask = nil
+                    self.activeManusChatRunID = nil
+                }
+            }
+
+            do {
+                switch route {
+                case .directManus:
+                    try await self.client.streamManusChat(sessionID: sessionID, message: message, attachments: attachments) { event in
+                        await MainActor.run {
+                            self.applyManusStreamEvent(event)
+                        }
+                    }
+                    await self.refreshManusThreadAfterStream(sessionID)
+                case .hippoChat:
+                    try await self.client.streamChatMessage(sessionID: sessionID, message: message, attachments: attachments) { event in
+                        await MainActor.run {
+                            self.applyManusStreamEvent(event)
+                        }
+                    }
+                    await self.refreshManusThreadAfterStream(sessionID)
+                }
+
+                if self.activeManusChatRunID == runID, self.manusMessages.last?.role != "assistant_error" {
+                    self.lastError = nil
+                }
+            } catch {
+                guard self.activeManusChatRunID == runID else { return }
+                if self.isCancellation(error) {
+                    return
+                }
+                if self.isOrchestratorConnectionFailure(error) {
+                    try? await self.recoverLocalOrchestrator(action: "app_state.manus_chat_stream", originalError: error)
+                }
+                self.lastError = error.localizedDescription
+                self.appendManusErrorMessage(
+                    from: .object([
+                        "event_id": .string("client_stream_error_\(Int(Date().timeIntervalSince1970))"),
+                        "timestamp": .number(Date().timeIntervalSince1970),
+                        "error": .string("Chat stream failed: \(error.localizedDescription)")
+                    ])
+                )
+            }
+        }
+        manusChatTask = task
+    }
+
+    private func refreshManusThreadAfterStream(_ sessionID: String) async {
+        manusThreads = (try? await withOrchestratorRecovery(action: "app_state.refresh_manus_thread_after_stream.sessions") {
+            try await client.manusSessions().sessions
+        }) ?? manusThreads
+        try? await loadManusThreadWithoutBusy(sessionID)
     }
 
     func loadManusSandboxAccess() async {
@@ -482,7 +664,9 @@ final class AppStateStore: ObservableObject {
         defer { isLoadingManusSandboxAccess = false }
 
         do {
-            manusSandboxAccess = try await client.manusSandboxAccess(sessionID: currentManusThread.id)
+            manusSandboxAccess = try await withOrchestratorRecovery(action: "app_state.load_manus_sandbox_access") {
+                try await client.manusSandboxAccess(sessionID: currentManusThread.id)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -499,7 +683,9 @@ final class AppStateStore: ObservableObject {
         defer { isLoadingManusFiles = false }
 
         do {
-            manusFilesResponse = try await client.manusFiles(sessionID: currentManusThread.id)
+            manusFilesResponse = try await withOrchestratorRecovery(action: "app_state.load_manus_files") {
+                try await client.manusFiles(sessionID: currentManusThread.id)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -517,7 +703,9 @@ final class AppStateStore: ObservableObject {
         defer { isLoadingManusFilePreview = false }
 
         do {
-            manusFilePreview = try await client.manusFilePreview(sessionID: currentManusThread.id, file: file)
+            manusFilePreview = try await withOrchestratorRecovery(action: "app_state.load_manus_file_preview") {
+                try await client.manusFilePreview(sessionID: currentManusThread.id, file: file)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -534,7 +722,9 @@ final class AppStateStore: ObservableObject {
         defer { isLoadingManusFileDownloadLink = false }
 
         do {
-            let link = try await client.manusFileDownloadLink(fileID: file.fileIdentifier)
+            let link = try await withOrchestratorRecovery(action: "app_state.load_manus_download_link") {
+                try await client.manusFileDownloadLink(fileID: file.fileIdentifier)
+            }
             manusFileDownloadLink = link
             lastError = nil
             return link
@@ -628,10 +818,16 @@ final class AppStateStore: ObservableObject {
         defer { isBusy = false }
 
         do {
-            vlmacConfig = try await client.vlmacConfig()
-            let service = try await client.vlmacStatus()
+            vlmacConfig = try await withOrchestratorRecovery(action: "app_state.refresh_vlmac.config") {
+                try await client.vlmacConfig()
+            }
+            let service = try await withOrchestratorRecovery(action: "app_state.refresh_vlmac.status") {
+                try await client.vlmacStatus()
+            }
             applyVlmacService(service)
-            vlmacPreflight = try await client.vlmacPreflight(network: network)
+            vlmacPreflight = try await withOrchestratorRecovery(action: "app_state.refresh_vlmac.preflight") {
+                try await client.vlmacPreflight(network: network)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -659,17 +855,25 @@ final class AppStateStore: ObservableObject {
         defer { isBusy = false }
 
         do {
-            vlmacConfig = try await client.updateVlmacConfig(
-                VlmacConfigRequest(
-                    vlmBaseUrl: vlmBaseUrl,
-                    vlmModel: vlmModel,
-                    vlmApiKey: vlmApiKey
+            vlmacConfig = try await withOrchestratorRecovery(action: "app_state.update_vlmac") {
+                try await client.updateVlmacConfig(
+                    VlmacConfigRequest(
+                        vlmBaseUrl: vlmBaseUrl,
+                        vlmModel: vlmModel,
+                        vlmApiKey: vlmApiKey
+                    )
                 )
-            )
-            let service = try await client.vlmacStatus()
+            }
+            let service = try await withOrchestratorRecovery(action: "app_state.update_vlmac.status") {
+                try await client.vlmacStatus()
+            }
             applyVlmacService(service)
-            vlmacPreflight = try await client.vlmacPreflight(network: false)
-            snapshot = try await client.state()
+            vlmacPreflight = try await withOrchestratorRecovery(action: "app_state.update_vlmac.preflight") {
+                try await client.vlmacPreflight(network: false)
+            }
+            snapshot = try await withOrchestratorRecovery(action: "app_state.update_vlmac.state") {
+                try await client.state()
+            }
             await refreshEventHistory()
             lastError = nil
         } catch {
@@ -707,24 +911,30 @@ final class AppStateStore: ObservableObject {
         defer { isBusy = false }
 
         do {
-            ownscribeConfig = try await client.updateOwnscribeConfig(
-                OwnscribeConfigRequest(
-                    audioSource: audioSource,
-                    micDevice: micDevice,
-                    audioDisplay: audioDisplay,
-                    asrProvider: asrProvider,
-                    asrBaseUrl: asrBaseUrl,
-                    asrModel: asrModel,
-                    asrApiKey: asrApiKey,
-                    summaryProvider: summaryProvider,
-                    summaryBaseUrl: summaryBaseUrl,
-                    summaryModel: summaryModel,
-                    summaryApiKey: summaryApiKey,
-                    apiKey: apiKey
+            ownscribeConfig = try await withOrchestratorRecovery(action: "app_state.update_ownscribe") {
+                try await client.updateOwnscribeConfig(
+                    OwnscribeConfigRequest(
+                        audioSource: audioSource,
+                        micDevice: micDevice,
+                        audioDisplay: audioDisplay,
+                        asrProvider: asrProvider,
+                        asrBaseUrl: asrBaseUrl,
+                        asrModel: asrModel,
+                        asrApiKey: asrApiKey,
+                        summaryProvider: summaryProvider,
+                        summaryBaseUrl: summaryBaseUrl,
+                        summaryModel: summaryModel,
+                        summaryApiKey: summaryApiKey,
+                        apiKey: apiKey
+                    )
                 )
-            )
-            ownscribePreflight = try await client.ownscribePreflight(network: false)
-            snapshot = try await client.state()
+            }
+            ownscribePreflight = try await withOrchestratorRecovery(action: "app_state.update_ownscribe.preflight") {
+                try await client.ownscribePreflight(network: false)
+            }
+            snapshot = try await withOrchestratorRecovery(action: "app_state.update_ownscribe.state") {
+                try await client.state()
+            }
             await refreshEventHistory()
             lastError = nil
         } catch {
@@ -756,18 +966,97 @@ final class AppStateStore: ObservableObject {
         AppCopy.serviceDetail(detail, status: status, language: language)
     }
 
+    private func withOrchestratorRecovery<T>(
+        action: String,
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        do {
+            return try await operation()
+        } catch {
+            guard shouldRecoverLocalOrchestrator(after: error) else {
+                throw error
+            }
+            try await recoverLocalOrchestrator(action: action, originalError: error)
+            return try await operation()
+        }
+    }
+
+    private func shouldRecoverLocalOrchestrator(after error: Error) -> Bool {
+        guard isLocalOrchestratorBaseURL else { return false }
+        return isOrchestratorConnectionFailure(error)
+    }
+
+    private func recoverLocalOrchestrator(action: String, originalError: Error) async throws {
+        let startedAt = AppLog.start()
+        if isRecoveringOrchestrator {
+            AppLog.event(action: "orchestrator.recover", path: action, status: "waiting", startedAt: startedAt, error: originalError)
+            while isRecoveringOrchestrator {
+                try await Task.sleep(nanoseconds: 100_000_000)
+            }
+            if (try? await client.health()) == true {
+                AppLog.event(action: "orchestrator.recover", path: action, status: "ready_after_wait", startedAt: startedAt)
+                return
+            }
+        }
+
+        isRecoveringOrchestrator = true
+        defer { isRecoveringOrchestrator = false }
+
+        AppLog.event(action: "orchestrator.recover", path: action, status: "starting", startedAt: startedAt, error: originalError)
+        do {
+            try await launcher.ensureRunning(client: client)
+            AppLog.event(action: "orchestrator.recover", path: action, status: "ready", startedAt: startedAt)
+        } catch {
+            AppLog.event(action: "orchestrator.recover", path: action, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
+    }
+
+    private var isLocalOrchestratorBaseURL: Bool {
+        let stored = UserDefaults.standard.string(forKey: "orchestratorBaseURL")
+        let value = stored?.isEmpty == false ? stored! : "http://127.0.0.1:8787"
+        guard let url = URL(string: value), let host = url.host?.lowercased() else {
+            return true
+        }
+        return host == "127.0.0.1" || host == "localhost" || host == "::1"
+    }
+
+    private func isOrchestratorConnectionFailure(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .cannotConnectToHost, .networkConnectionLost, .cannotFindHost, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func isOrchestratorUnavailable(_ error: Error) -> Bool {
+        if isOrchestratorConnectionFailure(error) {
+            return true
+        }
+        if case OrchestratorError.badStatus(let code, _) = error, code < 0 {
+            return true
+        }
+        return false
+    }
+
     private func run(_ operation: @escaping () async throws -> AppSnapshot) async {
+        let startedAt = AppLog.start()
         isBusy = true
         defer { isBusy = false }
 
         do {
-            let next = try await operation()
+            let next = try await withOrchestratorRecovery(action: "app_state.run") {
+                try await operation()
+            }
             snapshot = next
             skillStore.persist(next.skills)
             await refreshCuaTargetSurface()
             await refreshEventHistory()
             await loadContextFragments(reportErrors: false)
             lastError = nil
+            AppLog.event(action: "app_state.run", status: "ok", startedAt: startedAt, eventCount: eventHistory.count)
         } catch {
             lastError = error.localizedDescription
             snapshot = AppSnapshot(
@@ -779,22 +1068,28 @@ final class AppStateStore: ObservableObject {
                 skills: snapshot.skills,
                 services: snapshot.services
             )
+            AppLog.event(action: "app_state.run", status: "error", startedAt: startedAt, error: error)
         }
     }
 
     private func refreshEventHistory() async {
-        if let events = try? await client.eventHistory(limit: 80) {
+        let events = try? await withOrchestratorRecovery(action: "app_state.refresh_event_history") {
+            try await client.eventHistory(limit: 80)
+        }
+        if let events {
             eventHistory = events
         }
     }
 
     private func loadContextFragments(reportErrors: Bool) async {
         do {
-            let response = try await client.recentContextFragments(
-                sessionID: snapshot.currentSession?.id,
-                modality: "voice",
-                limit: 8
-            )
+            let response = try await withOrchestratorRecovery(action: "app_state.load_context_fragments") {
+                try await client.recentContextFragments(
+                    sessionID: snapshot.currentSession?.id,
+                    modality: "voice",
+                    limit: 8
+                )
+            }
             contextFragments = response.resolvedFragments
             if reportErrors {
                 lastError = nil
@@ -811,7 +1106,10 @@ final class AppStateStore: ObservableObject {
             cuaTargetSurface = .empty
             return
         }
-        if let surface = try? await client.cuaTargetSurface() {
+        let surface = try? await withOrchestratorRecovery(action: "app_state.refresh_cua_target_surface") {
+            try await client.cuaTargetSurface()
+        }
+        if let surface {
             cuaTargetSurface = surface
         }
     }
@@ -823,13 +1121,19 @@ final class AppStateStore: ObservableObject {
         defer { isRunningAiManusRuntimeCommand = false }
 
         do {
-            let response = try await operation()
+            let response = try await withOrchestratorRecovery(action: "app_state.ai_manus_runtime_command") {
+                try await operation()
+            }
             aiManusRuntimeLastCommand = response
             applyAiManusRuntimeService(response.service)
-            aiManusRuntimeLogs = (try? await client.aiManusRuntimeLogs(limit: 80)) ?? aiManusRuntimeLogs
+            aiManusRuntimeLogs = (try? await withOrchestratorRecovery(action: "app_state.ai_manus_runtime_command.logs_before_refresh") {
+                try await client.aiManusRuntimeLogs(limit: 80)
+            }) ?? aiManusRuntimeLogs
             try? await Task.sleep(nanoseconds: 1_000_000_000)
             await refreshManus()
-            aiManusRuntimeLogs = (try? await client.aiManusRuntimeLogs(limit: 80)) ?? aiManusRuntimeLogs
+            aiManusRuntimeLogs = (try? await withOrchestratorRecovery(action: "app_state.ai_manus_runtime_command.logs_after_refresh") {
+                try await client.aiManusRuntimeLogs(limit: 80)
+            }) ?? aiManusRuntimeLogs
             await refreshEventHistory()
             lastError = nil
         } catch {
@@ -843,7 +1147,9 @@ final class AppStateStore: ObservableObject {
         }
 
         do {
-            basicMemoryNotePreview = try await client.basicMemoryNotePreview(request)
+            basicMemoryNotePreview = try await withOrchestratorRecovery(action: "app_state.load_basic_memory_note_preview") {
+                try await client.basicMemoryNotePreview(request)
+            }
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -855,8 +1161,12 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemoryLastSync = try await client.syncBasicMemorySession(sessionID)
-            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            basicMemoryLastSync = try await withOrchestratorRecovery(action: "app_state.sync_basic_memory_session") {
+                try await client.syncBasicMemorySession(sessionID)
+            }
+            basicMemoryRecent = (try? await withOrchestratorRecovery(action: "app_state.sync_basic_memory_session.recent") {
+                try await client.recentBasicMemoryNotes(limit: 8)
+            }) ?? basicMemoryRecent
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -868,8 +1178,12 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemoryLastSync = try await client.syncBasicMemoryTask(taskID)
-            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            basicMemoryLastSync = try await withOrchestratorRecovery(action: "app_state.sync_basic_memory_task") {
+                try await client.syncBasicMemoryTask(taskID)
+            }
+            basicMemoryRecent = (try? await withOrchestratorRecovery(action: "app_state.sync_basic_memory_task.recent") {
+                try await client.recentBasicMemoryNotes(limit: 8)
+            }) ?? basicMemoryRecent
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -881,8 +1195,12 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemoryLastSync = try await client.syncBasicMemorySkill(skillID)
-            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            basicMemoryLastSync = try await withOrchestratorRecovery(action: "app_state.sync_basic_memory_skill") {
+                try await client.syncBasicMemorySkill(skillID)
+            }
+            basicMemoryRecent = (try? await withOrchestratorRecovery(action: "app_state.sync_basic_memory_skill.recent") {
+                try await client.recentBasicMemoryNotes(limit: 8)
+            }) ?? basicMemoryRecent
             lastError = nil
         } catch {
             lastError = error.localizedDescription
@@ -894,8 +1212,12 @@ final class AppStateStore: ObservableObject {
         defer { isRunningBasicMemoryCommand = false }
 
         do {
-            basicMemoryLastSync = try await client.syncBasicMemoryContext(fragmentID: fragmentID)
-            basicMemoryRecent = (try? await client.recentBasicMemoryNotes(limit: 8)) ?? basicMemoryRecent
+            basicMemoryLastSync = try await withOrchestratorRecovery(action: "app_state.sync_basic_memory_context") {
+                try await client.syncBasicMemoryContext(fragmentID: fragmentID)
+            }
+            basicMemoryRecent = (try? await withOrchestratorRecovery(action: "app_state.sync_basic_memory_context.recent") {
+                try await client.recentBasicMemoryNotes(limit: 8)
+            }) ?? basicMemoryRecent
             await loadContextFragments(reportErrors: false)
             lastError = nil
         } catch {
@@ -932,7 +1254,9 @@ final class AppStateStore: ObservableObject {
     }
 
     private func loadManusThreadWithoutBusy(_ sessionID: String) async throws {
-        let detail = try await client.manusThreadDetail(sessionID: sessionID)
+        let detail = try await withOrchestratorRecovery(action: "app_state.load_manus_thread") {
+            try await client.manusThreadDetail(sessionID: sessionID)
+        }
         currentManusThread = ManusThread(
             sessionId: detail.sessionId,
             manusSessionId: detail.manusSessionId,
@@ -943,8 +1267,12 @@ final class AppStateStore: ObservableObject {
             unreadMessageCount: nil,
             isShared: detail.isShared
         )
-        if !manusThreads.contains(where: { $0.id == detail.sessionId }), let currentManusThread {
-            manusThreads.insert(currentManusThread, at: 0)
+        if let currentManusThread {
+            if let index = manusThreads.firstIndex(where: { $0.id == detail.sessionId || $0.sessionId == detail.sessionId }) {
+                manusThreads[index] = currentManusThread
+            } else {
+                manusThreads.insert(currentManusThread, at: 0)
+            }
         }
         manusMessages = []
         manusPlan = []
@@ -1011,7 +1339,7 @@ final class AppStateStore: ObservableObject {
             appendAssistantMessageDelta(from: data)
         case "message_complete":
             break
-        case "plan":
+        case "plan", "plan_updated":
             manusPlan = planSteps(from: data)
         case "step":
             if let step = makePlanStep(from: data) {
@@ -1021,7 +1349,7 @@ final class AppStateStore: ObservableObject {
                     manusPlan.append(step)
                 }
             }
-        case "tool":
+        case "tool", "tool_event":
             if let tool = makeToolEvent(from: data) {
                 if let index = manusTools.firstIndex(where: { $0.id == tool.id }) {
                     manusTools[index] = tool
@@ -1029,13 +1357,63 @@ final class AppStateStore: ObservableObject {
                     manusTools.append(tool)
                 }
             }
+        case "thread":
+            updateCurrentManusThread(from: data)
         case "title":
             updateCurrentManusTitle(from: data)
-        case "error":
-            lastError = stringField("error", in: data)
+        case "error", "auth_required":
+            appendManusErrorMessage(from: data)
         default:
             break
         }
+    }
+
+    private func appendManusErrorMessage(from value: JSONValue) {
+        let now = Int(Date().timeIntervalSince1970)
+        let message: String
+        let eventId: String?
+        let timestamp: Int?
+        if case .object(let object) = value {
+            message = stringField("error", in: object)
+                ?? stringField("message", in: object)
+                ?? stringField("detail", in: object)
+                ?? "Manus returned an error."
+            eventId = normalizedEventId(from: object)
+            timestamp = intField("timestamp", in: object)
+        } else if case .string(let text) = value {
+            message = text.isEmpty ? "Manus returned an error." : text
+            eventId = nil
+            timestamp = nil
+        } else {
+            message = value.compactDescription.isEmpty ? "Manus returned an error." : value.compactDescription
+            eventId = nil
+            timestamp = nil
+        }
+
+        lastError = message
+        if manusMessages.last?.role == "assistant_error", manusMessages.last?.content == message {
+            return
+        }
+        manusMessages.append(
+            ManusMessage(
+                id: eventId ?? "message_error_\(timestamp ?? now)_\(manusMessages.count)",
+                role: "assistant_error",
+                content: message,
+                timestamp: timestamp ?? now,
+                eventId: eventId,
+                attachments: nil
+            )
+        )
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        if error is CancellationError {
+            return true
+        }
+        if let urlError = error as? URLError, urlError.code == .cancelled {
+            return true
+        }
+        return false
     }
 
     private func appendAssistantMessageDelta(from value: JSONValue) {
@@ -1139,6 +1517,61 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    private func updateCurrentManusThread(from value: JSONValue) {
+        guard case .object(let object) = value else { return }
+        let sessionID = stringField("session_id", in: object)
+            ?? stringField("sessionId", in: object)
+            ?? currentManusThread?.sessionId
+        guard let sessionID else { return }
+
+        var thread = currentManusThread
+        if thread?.sessionId != sessionID {
+            thread = manusThreads.first { $0.sessionId == sessionID || $0.id == sessionID }
+        }
+
+        var updated = thread ?? ManusThread(
+            sessionId: sessionID,
+            title: nil,
+            status: "unknown",
+            latestMessage: nil,
+            latestMessageAt: nil,
+            unreadMessageCount: nil,
+            isShared: nil
+        )
+        updated.id = stringField("id", in: object) ?? updated.id
+        updated.sessionId = sessionID
+        updated.manusSessionId = stringField("manus_session_id", in: object)
+            ?? stringField("manusSessionId", in: object)
+            ?? updated.manusSessionId
+        updated.title = stringField("title", in: object) ?? updated.title
+        updated.status = stringField("status", in: object) ?? updated.status
+        updated.latestMessage = stringField("latest_message", in: object)
+            ?? stringField("latestMessage", in: object)
+            ?? updated.latestMessage
+        updated.latestMessageAt = intField("latest_message_at", in: object)
+            ?? intField("latestMessageAt", in: object)
+            ?? updated.latestMessageAt
+        updated.unreadMessageCount = intField("unread_message_count", in: object)
+            ?? intField("unreadMessageCount", in: object)
+            ?? updated.unreadMessageCount
+        updated.isShared = boolField("is_shared", in: object)
+            ?? boolField("isShared", in: object)
+            ?? updated.isShared
+        updated.createdAt = stringField("created_at", in: object)
+            ?? stringField("createdAt", in: object)
+            ?? updated.createdAt
+        updated.updatedAt = stringField("updated_at", in: object)
+            ?? stringField("updatedAt", in: object)
+            ?? updated.updatedAt
+
+        currentManusThread = updated
+        if let index = manusThreads.firstIndex(where: { $0.id == updated.id || $0.sessionId == sessionID }) {
+            manusThreads[index] = updated
+        } else {
+            manusThreads.insert(updated, at: 0)
+        }
+    }
+
     private func stringField(_ key: String, in value: JSONValue) -> String? {
         guard case .object(let object) = value else { return nil }
         return stringField(key, in: object)
@@ -1160,6 +1593,11 @@ final class AppStateStore: ObservableObject {
         }
     }
 
+    private func boolField(_ key: String, in object: [String: JSONValue]) -> Bool? {
+        guard case .bool(let value)? = object[key] else { return nil }
+        return value
+    }
+
     private func arrayField(_ key: String, in object: [String: JSONValue]) -> [JSONValue]? {
         guard case .array(let value)? = object[key] else { return nil }
         return value
@@ -1171,24 +1609,36 @@ final class AppStateStore: ObservableObject {
     }
 
     private func ensureOrchestrator() async {
+        let startedAt = AppLog.start()
         do {
             try await launcher.ensureRunning(client: client)
+            AppLog.event(action: "app_state.ensure_orchestrator", status: "ok", startedAt: startedAt)
         } catch {
             let prefix = language == .simplifiedChinese ? "无法启动 Orchestrator" : "Could not start Orchestrator"
             lastError = "\(prefix): \(error.localizedDescription)"
+            AppLog.event(action: "app_state.ensure_orchestrator", status: "error", startedAt: startedAt, error: error)
         }
     }
 
     private func startEvents() {
         guard eventsTask == nil else { return }
+        AppLog.event(action: "app_state.start_events", path: "events", status: "starting")
 
         eventsTask = Task { [weak self] in
             guard let self else { return }
+            let startedAt = AppLog.start()
+            defer {
+                self.eventsTask = nil
+            }
             do {
-                try await self.client.listenForEvents {
-                    await self.refresh()
+                try await self.withOrchestratorRecovery(action: "app_state.start_events") {
+                    try await self.client.listenForEvents {
+                        await self.refresh()
+                    }
                 }
+                AppLog.event(action: "app_state.start_events", path: "events", status: "ended", startedAt: startedAt)
             } catch {
+                AppLog.event(action: "app_state.start_events", path: "events", status: "error", startedAt: startedAt, error: error)
                 await MainActor.run {
                     let prefix = self.language == .simplifiedChinese ? "事件流已断开" : "Event stream disconnected"
                     self.lastError = "\(prefix): \(error.localizedDescription)"

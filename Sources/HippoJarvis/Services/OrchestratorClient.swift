@@ -52,10 +52,26 @@ struct OrchestratorClient {
     }()
 
     func health() async throws -> Bool {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: "health")
-        let (_, response) = try await URLSession.shared.data(from: url)
-        guard let http = response as? HTTPURLResponse else { return false }
-        return (200..<300).contains(http.statusCode)
+        do {
+            let (_, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse else {
+                AppLog.event(action: "http.get", path: "health", status: "non_http", startedAt: startedAt)
+                return false
+            }
+            let ok = (200..<300).contains(http.statusCode)
+            AppLog.event(
+                action: "http.get",
+                path: "health",
+                status: ok ? "ok" : "http_\(http.statusCode)",
+                startedAt: startedAt
+            )
+            return ok
+        } catch {
+            AppLog.event(action: "http.get", path: "health", status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     func state() async throws -> AppSnapshot {
@@ -63,14 +79,23 @@ struct OrchestratorClient {
     }
 
     func eventHistory(limit: Int = 50) async throws -> [EventRecord] {
+        let startedAt = AppLog.start()
+        let path = "events/history"
         var components = URLComponents(url: baseURL.appending(path: "events/history"), resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "limit", value: "\(limit)")]
         guard let url = components?.url else {
             throw OrchestratorError.invalidURL("events/history")
         }
-        let (data, response) = try await URLSession.shared.data(from: url)
-        try validate(response, data: data)
-        return try decoder.decode([EventRecord].self, from: data)
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            try validate(response, data: data)
+            let events = try decoder.decode([EventRecord].self, from: data)
+            AppLog.event(action: "http.get", path: path, status: httpStatus(response), startedAt: startedAt, eventCount: events.count)
+            return events
+        } catch {
+            AppLog.event(action: "http.get", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     func jarvisOn() async throws -> AppSnapshot {
@@ -213,6 +238,10 @@ struct OrchestratorClient {
 
     func aiManusStatus() async throws -> AiManusStatus {
         try await getWrapped(path: "integrations/ai-manus/status")
+    }
+
+    func validateAiManusModel() async throws -> ModelValidationResponse {
+        try await postWrapped(path: "integrations/ai-manus/model/validate")
     }
 
     func aiManusRuntimeStart(build: Bool = false) async throws -> AiManusRuntimeCommandResponse {
@@ -395,6 +424,9 @@ struct OrchestratorClient {
         requestBody: ManusChatRequest,
         onEvent: @escaping @Sendable (ManusStreamEvent) async -> Void
     ) async throws {
+        let startedAt = AppLog.start()
+        let logPath = urlPath(url)
+        var eventCount = 0
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 1_800
@@ -402,28 +434,48 @@ struct OrchestratorClient {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(requestBody)
 
-        let (bytes, response) = try await URLSession.shared.bytes(for: request)
-        try validate(response)
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(for: request)
+            try validate(response)
 
-        var eventName: String?
-        for try await line in bytes.lines {
-            if line.hasPrefix("event:") {
-                eventName = String(line.dropFirst("event:".count)).trimmingCharacters(in: .whitespaces)
-                continue
+            var eventName: String?
+            for try await line in bytes.lines {
+                if line.hasPrefix("event:") {
+                    eventName = String(line.dropFirst("event:".count)).trimmingCharacters(in: .whitespaces)
+                    continue
+                }
+                guard line.hasPrefix("data:") else { continue }
+
+                let payload = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
+                guard !payload.isEmpty, payload != "[DONE]" else { continue }
+
+                let data = Data(payload.utf8)
+                let decoded = try decoder.decode(JSONValue.self, from: data)
+                let nextEvent = ManusStreamEvent(
+                    event: eventName ?? eventNameFromData(decoded) ?? "message",
+                    data: dataFromEventEnvelope(decoded)
+                )
+                eventCount += 1
+                await onEvent(nextEvent)
+                eventName = nil
             }
-            guard line.hasPrefix("data:") else { continue }
-
-            let payload = String(line.dropFirst("data:".count)).trimmingCharacters(in: .whitespaces)
-            guard !payload.isEmpty, payload != "[DONE]" else { continue }
-
-            let data = Data(payload.utf8)
-            let decoded = try decoder.decode(JSONValue.self, from: data)
-            let nextEvent = ManusStreamEvent(
-                event: eventName ?? eventNameFromData(decoded) ?? "message",
-                data: dataFromEventEnvelope(decoded)
+            AppLog.event(
+                action: "sse.chat",
+                path: logPath,
+                status: httpStatus(response),
+                startedAt: startedAt,
+                eventCount: eventCount
             )
-            await onEvent(nextEvent)
-            eventName = nil
+        } catch {
+            AppLog.event(
+                action: "sse.chat",
+                path: logPath,
+                status: "error",
+                startedAt: startedAt,
+                error: error,
+                eventCount: eventCount
+            )
+            throw error
         }
     }
 
@@ -448,33 +500,58 @@ struct OrchestratorClient {
     }
 
     func listenForEvents(onEvent: @escaping @Sendable () async -> Void) async throws {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: "events")
-        let (bytes, response) = try await URLSession.shared.bytes(from: url)
-        try validate(response)
+        var eventCount = 0
+        do {
+            let (bytes, response) = try await URLSession.shared.bytes(from: url)
+            try validate(response)
 
-        for try await line in bytes.lines {
-            if line.hasPrefix("data:") {
-                await onEvent()
+            for try await line in bytes.lines {
+                if line.hasPrefix("data:") {
+                    eventCount += 1
+                    await onEvent()
+                }
             }
+            AppLog.event(action: "sse.events", path: "events", status: httpStatus(response), startedAt: startedAt, eventCount: eventCount)
+        } catch {
+            AppLog.event(action: "sse.events", path: "events", status: "error", startedAt: startedAt, error: error, eventCount: eventCount)
+            throw error
         }
     }
 
     private func getSnapshot(path: String) async throws -> AppSnapshot {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: path)
-        let (data, response) = try await URLSession.shared.data(from: url)
-        try validate(response, data: data)
-        return try decoder.decode(AppSnapshot.self, from: data)
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            try validate(response, data: data)
+            let snapshot = try decoder.decode(AppSnapshot.self, from: data)
+            AppLog.event(action: "http.get", path: path, status: httpStatus(response), startedAt: startedAt)
+            return snapshot
+        } catch {
+            AppLog.event(action: "http.get", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func postSnapshot(path: String) async throws -> AppSnapshot {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 1_800
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response, data: data)
-        return try decoder.decode(AppSnapshot.self, from: data)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response, data: data)
+            let snapshot = try decoder.decode(AppSnapshot.self, from: data)
+            AppLog.event(action: "http.post", path: path, status: httpStatus(response), startedAt: startedAt)
+            return snapshot
+        } catch {
+            AppLog.event(action: "http.post", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func get<T: Decodable>(path: String) async throws -> T {
@@ -482,9 +559,18 @@ struct OrchestratorClient {
     }
 
     private func get<T: Decodable>(url: URL) async throws -> T {
-        let (data, response) = try await URLSession.shared.data(from: url)
-        try validate(response, data: data)
-        return try decoder.decode(T.self, from: data)
+        let startedAt = AppLog.start()
+        let path = urlPath(url)
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            try validate(response, data: data)
+            let value = try decoder.decode(T.self, from: data)
+            AppLog.event(action: "http.get", path: path, status: httpStatus(response), startedAt: startedAt)
+            return value
+        } catch {
+            AppLog.event(action: "http.get", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func getWrapped<T: Decodable>(path: String) async throws -> T {
@@ -492,23 +578,40 @@ struct OrchestratorClient {
     }
 
     private func getWrapped<T: Decodable>(url: URL, path: String) async throws -> T {
-        let (data, response) = try await URLSession.shared.data(from: url)
-        try validate(response, data: data)
-        return try decodeWrapped(T.self, from: data, path: path)
+        let startedAt = AppLog.start()
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            try validate(response, data: data)
+            let value = try decodeWrapped(T.self, from: data, path: path)
+            AppLog.event(action: "http.get", path: path, status: httpStatus(response), startedAt: startedAt)
+            return value
+        } catch {
+            AppLog.event(action: "http.get", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func postWrapped<T: Decodable>(path: String) async throws -> T {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response, data: data)
-        return try decodeWrapped(T.self, from: data, path: path)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response, data: data)
+            let value = try decodeWrapped(T.self, from: data, path: path)
+            AppLog.event(action: "http.post", path: path, status: httpStatus(response), startedAt: startedAt)
+            return value
+        } catch {
+            AppLog.event(action: "http.post", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func postWrapped<Body: Encodable, Response: Decodable>(path: String, body: Body) async throws -> Response {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -516,12 +619,20 @@ struct OrchestratorClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(body)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response, data: data)
-        return try decodeWrapped(Response.self, from: data, path: path)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response, data: data)
+            let value = try decodeWrapped(Response.self, from: data, path: path)
+            AppLog.event(action: "http.post", path: path, status: httpStatus(response), startedAt: startedAt)
+            return value
+        } catch {
+            AppLog.event(action: "http.post", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func post<Body: Encodable, Response: Decodable>(path: String, body: Body) async throws -> Response {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -529,29 +640,51 @@ struct OrchestratorClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(body)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response, data: data)
-        return try decoder.decode(Response.self, from: data)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response, data: data)
+            let value = try decoder.decode(Response.self, from: data)
+            AppLog.event(action: "http.post", path: path, status: httpStatus(response), startedAt: startedAt)
+            return value
+        } catch {
+            AppLog.event(action: "http.post", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func postNoContent(path: String) async throws {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 60
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response, data: data)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response, data: data)
+            AppLog.event(action: "http.post", path: path, status: httpStatus(response), startedAt: startedAt)
+        } catch {
+            AppLog.event(action: "http.post", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func deleteSnapshot(path: String) async throws -> AppSnapshot {
+        let startedAt = AppLog.start()
         let url = baseURL.appending(path: path)
         var request = URLRequest(url: url)
         request.httpMethod = "DELETE"
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        let (data, response) = try await URLSession.shared.data(for: request)
-        try validate(response, data: data)
-        return try decoder.decode(AppSnapshot.self, from: data)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            try validate(response, data: data)
+            let snapshot = try decoder.decode(AppSnapshot.self, from: data)
+            AppLog.event(action: "http.delete", path: path, status: httpStatus(response), startedAt: startedAt)
+            return snapshot
+        } catch {
+            AppLog.event(action: "http.delete", path: path, status: "error", startedAt: startedAt, error: error)
+            throw error
+        }
     }
 
     private func validate(_ response: URLResponse, data: Data? = nil) throws {
@@ -589,6 +722,22 @@ struct OrchestratorClient {
             return value
         }
         return String(value.prefix(497)) + "..."
+    }
+
+    private func httpStatus(_ response: URLResponse) -> String {
+        guard let http = response as? HTTPURLResponse else {
+            return "non_http"
+        }
+        return (200..<300).contains(http.statusCode) ? "ok" : "http_\(http.statusCode)"
+    }
+
+    private func urlPath(_ url: URL) -> String {
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.scheme = nil
+        components?.host = nil
+        components?.port = nil
+        components?.query = nil
+        return components?.path.trimmingCharacters(in: CharacterSet(charactersIn: "/")) ?? url.path
     }
 
     private func decodeWrapped<T: Decodable>(_ type: T.Type, from data: Data, path: String) throws -> T {

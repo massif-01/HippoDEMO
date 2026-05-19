@@ -3,14 +3,16 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import logging
 import os
 import re
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
@@ -54,8 +56,11 @@ from .models import (
     now_iso,
 )
 from .store import SESSION_DIR, SKILL_DIR, store, to_dict
+from .logging_config import ORCHESTRATOR_LOG_PATH, PROJECT_DIR, RUNTIME_DIR, log_event, redact, setup_logging, tail_log
 
 
+setup_logging()
+logger = logging.getLogger("orchestrator.main")
 app = FastAPI(title="HippoDEMO Orchestrator", version="0.1.0")
 
 app.add_middleware(
@@ -65,6 +70,48 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def log_http_request(request: Request, call_next):
+    started = time.monotonic()
+    request_id = request.headers.get("x-request-id") or new_id("request")
+    logger.debug(
+        "http_request_started",
+        extra={
+            "event": "http_request_started",
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+        },
+    )
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        log_event(
+            logger,
+            "http_request_failed",
+            request_id=request_id,
+            method=request.method,
+            path=request.url.path,
+            duration_ms=round((time.monotonic() - started) * 1000, 2),
+            error_type=exc.__class__.__name__,
+            error_summary=_error_summary(exc),
+        )
+        raise
+    response.headers["x-request-id"] = request_id
+    logger.info(
+        "http_request_completed",
+        extra={
+            "event": "http_request_completed",
+            "request_id": request_id,
+            "method": request.method,
+            "path": request.url.path,
+            "status_code": response.status_code,
+            "duration_ms": round((time.monotonic() - started) * 1000, 2),
+        },
+    )
+    return response
 
 OPENCHRONICLE_STATUS_TTL_SECONDS = 10.0
 OWNSCRIBE_STATUS_TTL_SECONDS = 10.0
@@ -95,6 +142,14 @@ OWNSCRIBE_STOP_TIMEOUT_SECONDS = _float_env("HIPPODEMO_OWNSCRIBE_STOP_TIMEOUT_SE
 CONTEXT_FRAGMENT_SECONDS = _float_env("HIPPODEMO_CONTEXT_FRAGMENT_SECONDS", 20.0)
 CONTEXT_FRAGMENT_OVERLAP_SECONDS = _float_env("HIPPODEMO_CONTEXT_FRAGMENT_OVERLAP_SECONDS", 3.0)
 CONTEXT_MIN_FRAGMENT_SECONDS = _float_env("HIPPODEMO_CONTEXT_MIN_FRAGMENT_SECONDS", 1.0)
+
+
+def _error_summary(exc: Exception, *, limit: int = 300) -> str:
+    text = " ".join(str(exc).split()) or exc.__class__.__name__
+    redacted = str(redact(text))
+    if len(redacted) <= limit:
+        return redacted
+    return redacted[: max(0, limit - 3)] + "..."
 
 
 def _artifact_payload(artifact: Artifact) -> dict:
@@ -565,8 +620,27 @@ def _sse(event: str, data: Any = None, *, event_id: str | None = None) -> str:
 def _set_service_status(service: ServiceStatus) -> None:
     for index, existing in enumerate(store.state.services):
         if existing.name.lower() == service.name.lower():
+            if existing.status != service.status or existing.detail != service.detail:
+                log_event(
+                    logger,
+                    "service_status_changed",
+                    service=service.name,
+                    previous_status=existing.status,
+                    next_status=service.status,
+                    previous_detail=existing.detail,
+                    next_detail=service.detail,
+                )
             store.state.services[index] = service
             return
+    log_event(
+        logger,
+        "service_status_changed",
+        service=service.name,
+        previous_status=None,
+        next_status=service.status,
+        previous_detail=None,
+        next_detail=service.detail,
+    )
     store.state.services.append(service)
 
 
@@ -727,6 +801,15 @@ async def _refresh_ai_manus_status() -> ServiceStatus:
         await store.persist()
         _ai_manus_status_checked_at = time.monotonic()
         return service
+
+
+async def _wait_for_ai_manus_status(timeout_seconds: float = 0.0, interval_seconds: float = 0.5) -> ServiceStatus:
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    service = await ai_manus_adapter.status()
+    while service.status != "online" and time.monotonic() < deadline:
+        await asyncio.sleep(interval_seconds)
+        service = await ai_manus_adapter.status()
+    return service
 
 
 async def _refresh_basic_memory_status() -> ServiceStatus:
@@ -1558,6 +1641,116 @@ async def generate_skill_record(
 @app.get("/health", response_model=ServiceStatus)
 async def health() -> ServiceStatus:
     return ServiceStatus(name="HippoDEMO Orchestrator", status="ok", detail="mock-first FastAPI service")
+
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+_OWNSCRIBE_DATA_DIR = PROJECT_DIR / "orchestrator" / "data" / "ownscribe"
+_DIAGNOSTIC_ORIGIN_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _static_diagnostic_logs() -> dict[str, Path]:
+    return {
+        "orchestrator": ORCHESTRATOR_LOG_PATH,
+        "orchestrator-app": RUNTIME_DIR / "orchestrator-app.log",
+        "cua-driver": RUNTIME_DIR / "cua-driver.log",
+        "vlmac": RUNTIME_DIR / "vlmac.log",
+        "ai-manus-runtime": PROJECT_DIR / "orchestrator" / "data" / "ai_manus" / "runtime.log",
+    }
+
+
+def _ownscribe_session_log_paths(session_id: str) -> dict[str, Path]:
+    if not _SESSION_ID_RE.match(session_id):
+        raise HTTPException(status_code=404, detail="Unknown diagnostic session")
+    session_dir = _OWNSCRIBE_DATA_DIR / session_id
+    candidates = {
+        "ownscribe-stdout": session_dir / "ownscribe.stdout.log",
+        "ownscribe-stderr": session_dir / "ownscribe.stderr.log",
+    }
+    base = _OWNSCRIBE_DATA_DIR.resolve()
+    safe: dict[str, Path] = {}
+    for name, path in candidates.items():
+        resolved = path.resolve()
+        if not resolved.is_relative_to(base):
+            raise HTTPException(status_code=404, detail="Unknown diagnostic session")
+        safe[name] = resolved
+    return safe
+
+
+def _diagnostic_logs() -> dict[str, Path]:
+    logs = _static_diagnostic_logs()
+    session = store.state.current_session
+    if session:
+        for name, path in _ownscribe_session_log_paths(session.id).items():
+            logs[f"current-{name}"] = path
+    return logs
+
+
+def _validate_diagnostics_request(request: Request | None) -> None:
+    if request is None:
+        return
+    origin = request.headers.get("origin")
+    if not origin:
+        return
+    try:
+        host = urlparse(origin).hostname
+    except ValueError:
+        host = None
+    if host not in _DIAGNOSTIC_ORIGIN_HOSTS:
+        raise HTTPException(status_code=403, detail="Diagnostics logs are only available to local origins")
+
+
+def _log_descriptor(name: str, path: Path) -> dict[str, Any]:
+    try:
+        exists = path.exists()
+        stat = path.stat() if exists else None
+    except OSError:
+        exists = False
+        stat = None
+    return {
+        "name": name,
+        "exists": exists,
+        "bytes": stat.st_size if stat else 0,
+        "updated_at": datetime.fromtimestamp(stat.st_mtime).astimezone().isoformat() if stat else None,
+    }
+
+
+@app.get("/diagnostics/logs")
+async def diagnostics_logs(request: Request):
+    _validate_diagnostics_request(request)
+    return {"logs": [_log_descriptor(name, path) for name, path in _diagnostic_logs().items()]}
+
+
+@app.get("/diagnostics/logs/{name}")
+async def diagnostics_log_tail(name: str, request: Request, limit: int = 200):
+    _validate_diagnostics_request(request)
+    logs = _diagnostic_logs()
+    if name not in logs:
+        raise HTTPException(status_code=404, detail="Unknown diagnostic log")
+    safe_limit = max(1, min(int(limit), 1000))
+    path = logs[name]
+    return {
+        "name": name,
+        "limit": safe_limit,
+        "entries": tail_log(path, limit=safe_limit),
+    }
+
+
+@app.get("/diagnostics/session/{session_id}/logs")
+async def diagnostics_session_logs(session_id: str, request: Request, limit: int = 200):
+    _validate_diagnostics_request(request)
+    _session_or_404(session_id)
+    safe_limit = max(1, min(int(limit), 1000))
+    logs = _ownscribe_session_log_paths(session_id)
+    return {
+        "session_id": session_id,
+        "logs": [
+            {
+                **_log_descriptor(name, path),
+                "entries": tail_log(path, limit=safe_limit),
+            }
+            for name, path in logs.items()
+        ],
+    }
 
 
 @app.get("/state")
@@ -2559,7 +2752,15 @@ async def ai_manus_update_config(request: AiManusConfigRequest):
         max_tokens=request.max_tokens,
         extra_headers=request.extra_headers,
     )
-    service = await ai_manus_adapter.status()
+    runtime_restart = None
+    if config.get("restart_required"):
+        runtime_restart = ai_manus_adapter.restart_runtime(build=False)
+        if runtime_restart.get("status") not in {"completed", "running"}:
+            raise HTTPException(status_code=502, detail=runtime_restart.get("detail") or "ai-manus backend restart failed")
+        await asyncio.sleep(1.0)
+        config = ai_manus_adapter.config()
+
+    service = await _wait_for_ai_manus_status(timeout_seconds=18.0 if runtime_restart else 0.0)
     async with store._lock:
         await _apply_ai_manus_status(service)
         await store.publish(
@@ -2573,6 +2774,7 @@ async def ai_manus_update_config(request: AiManusConfigRequest):
                 "extra_headers_configured": config.get("extra_headers_configured"),
                 "model_name": config.get("model_name"),
                 "restart_required": config.get("restart_required"),
+                "runtime_restart": runtime_restart,
             },
         )
     return config
@@ -2584,6 +2786,24 @@ async def ai_manus_status():
     async with store._lock:
         await _apply_ai_manus_status(service)
         return _ai_manus_status_payload(service)
+
+
+@app.post("/integrations/ai-manus/model/validate")
+async def ai_manus_validate_model():
+    result = await ai_manus_adapter.validate_model_provider()
+    await store.publish(
+        "ai_manus_model_validation",
+        {
+            "ok": result.get("ok"),
+            "status": result.get("status"),
+            "api_base": result.get("api_base"),
+            "model_name": result.get("model_name"),
+            "models_count": result.get("models_count"),
+            "model_visible": result.get("model_visible"),
+            "detail": result.get("detail"),
+        },
+    )
+    return result
 
 
 @app.post("/integrations/ai-manus/runtime/start")
@@ -2738,8 +2958,14 @@ async def ai_manus_session_detail(session_id: str):
         detail["remote_detail"] = service.detail
         return detail
 
+    remote_session_id = _ai_manus_remote_session_id_or_none(local_thread)
+    if not remote_session_id:
+        detail["remote_status"] = "not_created"
+        detail["remote_detail"] = "No ai-manus remote session has been created for this local Hippo thread yet."
+        return detail
+
     try:
-        remote_data = await ai_manus_adapter.get_session(_ai_manus_remote_session_id(local_thread))
+        remote_data = await ai_manus_adapter.get_session(remote_session_id)
         remote = _ai_manus_remote_summary(remote_data)
         if remote:
             detail["remote"] = remote
@@ -2786,6 +3012,7 @@ async def ai_manus_chat(session_id: str, request: AiManusChatRequest):
             thread = await _ensure_ai_manus_remote_session(thread)
             thread.metadata["last_route"] = "ai_manus"
             await store.save_ai_manus_thread(thread)
+            yield _sse("thread", _ai_manus_thread_summary(thread))
             if request.message:
                 await store.append_ai_manus_message(
                     session_id,
@@ -2857,12 +3084,17 @@ async def ai_manus_chat(session_id: str, request: AiManusChatRequest):
                 {"session_id": session_id, "event_count": event_count},
                 session_id=session_id,
             )
+            try:
+                yield _sse("thread", _ai_manus_thread_summary(store.get_ai_manus_thread(session_id)))
+            except KeyError:
+                pass
         except AiManusAuthRequired:
             yield _sse("auth_required", ai_manus_adapter.auth_required_payload())
         except Exception as exc:
             with_error = AiManusThreadEvent(event="error", data={"error": str(exc)})
             try:
                 await store.append_ai_manus_event(session_id, with_error)
+                yield _sse("thread", _ai_manus_thread_summary(store.get_ai_manus_thread(session_id)))
             except KeyError:
                 pass
             await store.publish("ai_manus_chat_failed", {"session_id": session_id}, session_id=session_id)

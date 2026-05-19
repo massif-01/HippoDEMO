@@ -1,16 +1,20 @@
 from __future__ import annotations
 
-import os
 import json
+import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, AsyncGenerator, Optional
 
 import httpx
 
+from ..logging_config import log_event
+
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 PROJECT_CORTEX_DIR = PROJECT_DIR / "Project_Cortex"
+logger = logging.getLogger("orchestrator.adapters.project_cortex")
 
 
 @dataclass
@@ -170,11 +174,30 @@ class ProjectCortexAgentAdapter:
             "Accept": "text/event-stream",
         }
         timeout = httpx.Timeout(self.timeout_seconds, read=None)
+        event_count = 0
+        log_event(
+            logger,
+            "adapter_sse_started",
+            adapter="project-cortex",
+            method="POST",
+            path="/chat-messages",
+            query_chars=len(query),
+            skill_chars=len(skill),
+            context_chars=len(context),
+        )
         async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
             async with client.stream("POST", f"{self.base_url}/chat-messages", json=payload) as response:
                 if response.status_code >= 400:
                     body = await response.aread()
                     text = body.decode("utf-8", errors="replace") if body else ""
+                    log_event(
+                        logger,
+                        "adapter_sse_failed",
+                        adapter="project-cortex",
+                        path="/chat-messages",
+                        status_code=response.status_code,
+                        response_chars=len(text),
+                    )
                     raise RuntimeError(f"hippo_agent HTTP {response.status_code}: {text[:500]}")
 
                 buffer: dict[str, str] = {}
@@ -183,6 +206,7 @@ class ProjectCortexAgentAdapter:
                         event = self._sse_from_buffer(buffer)
                         buffer = {}
                         if event:
+                            event_count += 1
                             yield event
                         continue
                     if line.startswith(":") or ":" not in line:
@@ -191,7 +215,15 @@ class ProjectCortexAgentAdapter:
                     buffer[key] = f"{buffer.get(key, '')}\n{value.lstrip()}".strip()
                 event = self._sse_from_buffer(buffer)
                 if event:
+                    event_count += 1
                     yield event
+        log_event(
+            logger,
+            "adapter_sse_completed",
+            adapter="project-cortex",
+            path="/chat-messages",
+            event_count=event_count,
+        )
 
     def _sse_from_buffer(self, buffer: dict[str, str]) -> dict[str, Any] | None:
         data = buffer.get("data")

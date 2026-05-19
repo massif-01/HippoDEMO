@@ -169,7 +169,7 @@ struct MenuBarRootView: View {
                         .font(.system(size: 11, weight: .semibold, design: .monospaced))
                         .frame(width: 28, height: 28)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 7, pressedScale: 0.88, overlayOpacity: 0.16))
                 .foregroundStyle(.secondary)
                 .accessibilityLabel("Language")
 

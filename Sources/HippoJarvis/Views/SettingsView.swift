@@ -968,7 +968,7 @@ struct SettingsView: View {
                             subtitle: note.updatedAt ?? note.createdAt ?? note.summary ?? ""
                         )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.985, overlayOpacity: 0.10))
                 }
             }
         }
@@ -1055,7 +1055,7 @@ struct SettingsView: View {
                             subtitle: result.snippet ?? result.type ?? result.permalink ?? ""
                         )
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.985, overlayOpacity: 0.10))
                 }
             }
         }
@@ -1134,8 +1134,6 @@ struct SettingsView: View {
             summaryModel: nonEmpty(summaryModelDraft),
             summaryApiKey: nonEmpty(summaryKeyDraft)
         )
-        asrKeyDraft = ""
-        summaryKeyDraft = ""
         syncProviderDrafts()
     }
 
@@ -1152,7 +1150,6 @@ struct SettingsView: View {
             vlmModel: nonEmpty(vlmacModelDraft),
             vlmApiKey: nonEmpty(vlmacKeyDraft)
         )
-        vlmacKeyDraft = ""
         syncVlmacDrafts()
     }
 
@@ -1174,7 +1171,6 @@ struct SettingsView: View {
             maxTokens: intValue(aiManusMaxTokensDraft),
             extraHeaders: nonEmpty(aiManusExtraHeadersDraft)
         )
-        aiManusKeyDraft = ""
         syncAiManusDrafts()
     }
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any, AsyncGenerator
@@ -9,6 +11,7 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from ..logging_config import log_event
 from ..models import ServiceStatus
 from ..store import AI_MANUS_DIR, write_json
 
@@ -16,6 +19,7 @@ from ..store import AI_MANUS_DIR, write_json
 CONFIG_PATH = AI_MANUS_DIR / "config.json"
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 AI_MANUS_PROJECT_DIR = PROJECT_DIR / "ai-manus"
+AI_MANUS_COMPOSE_PATH = AI_MANUS_PROJECT_DIR / "docker-compose.yml"
 AI_MANUS_ENV_PATH = AI_MANUS_PROJECT_DIR / ".env"
 AI_MANUS_ENV_EXAMPLE_PATH = AI_MANUS_PROJECT_DIR / ".env.example"
 AI_MANUS_RUNTIME_LOG_PATH = AI_MANUS_DIR / "runtime.log"
@@ -28,6 +32,7 @@ AI_MANUS_MODEL_ENV_KEYS = (
     "MAX_TOKENS",
     "EXTRA_HEADERS",
 )
+logger = logging.getLogger("orchestrator.adapters.ai_manus")
 
 
 class AiManusAPIError(RuntimeError):
@@ -46,7 +51,7 @@ class AiManusAdapter:
     def _load_config(self) -> dict[str, Any]:
         config = {
             "base_url": os.getenv("HIPPODEMO_AI_MANUS_URL", "http://127.0.0.1:8000"),
-            "frontend_url": os.getenv("HIPPODEMO_AI_MANUS_FRONTEND_URL", "http://127.0.0.1:8080"),
+            "frontend_url": os.getenv("HIPPODEMO_AI_MANUS_FRONTEND_URL", "http://127.0.0.1:5173"),
             "auth_provider": os.getenv("AUTH_PROVIDER", os.getenv("HIPPODEMO_AI_MANUS_AUTH_PROVIDER", "none")),
             "api_key": os.getenv("HIPPODEMO_AI_MANUS_API_KEY"),
             "timeout_seconds": float(os.getenv("HIPPODEMO_AI_MANUS_TIMEOUT_SECONDS", "60")),
@@ -254,13 +259,14 @@ class AiManusAdapter:
         return self._spawn_runtime_command("start", self._up_command(build=build))
 
     def stop_runtime(self) -> dict[str, Any]:
-        return self._spawn_runtime_command("stop", [str(self._dev_script_path()), "stop"])
+        return self._spawn_runtime_command("stop", self._compose_command("stop", "frontend", "backend"))
 
     def restart_runtime(self, *, build: bool = False) -> dict[str, Any]:
-        command = [str(self._dev_script_path()), "up", "-d", "--force-recreate"]
+        command = self._compose_command("up", "-d", "--no-deps", "--force-recreate")
         if build:
             command.append("--build")
-        return self._spawn_runtime_command("restart", command)
+        command.append("backend")
+        return self._run_runtime_command("restart", command, timeout_seconds=90.0)
 
     def runtime_logs(self, *, limit: int = 80) -> dict[str, Any]:
         safe_limit = max(1, min(int(limit), 300))
@@ -274,6 +280,70 @@ class AiManusAdapter:
         return {
             "log_path": str(AI_MANUS_RUNTIME_LOG_PATH),
             "lines": [self._redact(line) for line in lines[-safe_limit:]],
+        }
+
+    async def validate_model_provider(self) -> dict[str, Any]:
+        values, source = self._read_model_env()
+        api_base = str(values.get("API_BASE") or "").strip()
+        model_name = str(values.get("MODEL_NAME") or "").strip()
+        api_key = values.get("API_KEY")
+
+        result: dict[str, Any] = {
+            "ok": False,
+            "status": "failed",
+            "api_base": api_base or None,
+            "model_name": model_name or None,
+            "models_count": 0,
+            "model_visible": False,
+            "env_source": source,
+        }
+        if not api_base:
+            return {**result, "detail": "API_BASE is not configured."}
+        if not model_name:
+            return {**result, "detail": "MODEL_NAME is not configured."}
+
+        url = self._join_url(api_base, "/models")
+        headers = self._model_provider_headers(values)
+        try:
+            async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+                log_event(
+                    logger,
+                    "model_provider_validation_started",
+                    adapter="ai-manus",
+                    path=self._safe_external_url(url),
+                )
+                response = await client.get(url)
+                response.raise_for_status()
+                payload = response.json()
+        except Exception as exc:
+            detail = self._redact_model_error(str(exc), api_key=api_key)
+            return {
+                **result,
+                "detail": f"Could not reach model provider /models: {detail}",
+                "checked_url": self._safe_external_url(url),
+            }
+
+        models = payload.get("data") if isinstance(payload, dict) else None
+        model_ids: list[str] = []
+        if isinstance(models, list):
+            for item in models:
+                if isinstance(item, dict) and item.get("id"):
+                    model_ids.append(str(item["id"]))
+        model_visible = model_name in model_ids
+        ok = bool(model_ids) and model_visible
+        detail = (
+            f"{len(model_ids)} model(s) visible; {model_name} is available."
+            if ok
+            else f"{len(model_ids)} model(s) visible; {model_name} was not found."
+        )
+        return {
+            **result,
+            "ok": ok,
+            "status": "ok" if ok else "model_not_found",
+            "detail": detail,
+            "models_count": len(model_ids),
+            "model_visible": model_visible,
+            "checked_url": self._safe_external_url(url),
         }
 
     async def stream_chat(
@@ -294,6 +364,16 @@ class AiManusAdapter:
         }
         timeout = httpx.Timeout(float(self._config["timeout_seconds"]), read=None)
         async with httpx.AsyncClient(timeout=timeout, headers=self._headers()) as client:
+            log_event(
+                logger,
+                "adapter_sse_started",
+                adapter="ai-manus",
+                method="POST",
+                path=f"/sessions/{session_id}/chat",
+                message_chars=len(message or ""),
+                attachments_count=len(attachments or []),
+            )
+            event_count = 0
             async with client.stream(
                 "POST",
                 self._url(f"/sessions/{session_id}/chat"),
@@ -306,6 +386,7 @@ class AiManusAdapter:
                         event = self._sse_from_buffer(buffer)
                         buffer = {}
                         if event:
+                            event_count += 1
                             yield event
                         continue
                     if line.startswith(":"):
@@ -316,7 +397,15 @@ class AiManusAdapter:
                     buffer[key] = f"{buffer.get(key, '')}\n{value.lstrip()}".strip()
                 event = self._sse_from_buffer(buffer)
                 if event:
+                    event_count += 1
                     yield event
+            log_event(
+                logger,
+                "adapter_sse_completed",
+                adapter="ai-manus",
+                path=f"/sessions/{session_id}/chat",
+                event_count=event_count,
+            )
 
     async def _request(
         self,
@@ -329,13 +418,39 @@ class AiManusAdapter:
         timeout = float(timeout_seconds if timeout_seconds is not None else self._config["timeout_seconds"])
         try:
             async with httpx.AsyncClient(timeout=timeout, headers=self._headers()) as client:
+                log_event(
+                    logger,
+                    "adapter_http_started",
+                    adapter="ai-manus",
+                    method=method,
+                    path=self._safe_path(path),
+                    timeout_seconds=timeout,
+                    request_keys=sorted(json_body.keys()) if isinstance(json_body, dict) else [],
+                )
                 response = await client.request(method, self._url(path), json=json_body)
                 response.raise_for_status()
+                log_event(
+                    logger,
+                    "adapter_http_completed",
+                    adapter="ai-manus",
+                    method=method,
+                    path=self._safe_path(path),
+                    status_code=response.status_code,
+                    response_bytes=len(response.content or b""),
+                )
                 if not response.content:
                     return None
                 return self._unwrap(response.json())
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code if exc.response else "unknown"
+            log_event(
+                logger,
+                "adapter_http_failed",
+                adapter="ai-manus",
+                method=method,
+                path=self._safe_path(path),
+                status_code=status_code,
+            )
             if status_code in {401, 403}:
                 raise AiManusAuthRequired(
                     f"ai-manus backend rejected Orchestrator access with HTTP {status_code} for {self._safe_path(path)}; "
@@ -343,6 +458,14 @@ class AiManusAdapter:
                 ) from exc
             raise AiManusAPIError(f"ai-manus HTTP {status_code} for {self._safe_path(path)}") from exc
         except httpx.RequestError as exc:
+            log_event(
+                logger,
+                "adapter_http_failed",
+                adapter="ai-manus",
+                method=method,
+                path=self._safe_path(path),
+                error_type=exc.__class__.__name__,
+            )
             raise AiManusAPIError(f"ai-manus backend unavailable at {self._safe_origin()}: {exc.__class__.__name__}") from exc
 
     def _unwrap(self, payload: Any) -> Any:
@@ -359,8 +482,30 @@ class AiManusAdapter:
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
+    def _model_provider_headers(self, values: dict[str, str]) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
+        api_key = values.get("API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        extra_headers = str(values.get("EXTRA_HEADERS") or "").strip()
+        if extra_headers:
+            try:
+                parsed = json.loads(extra_headers)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, dict):
+                for key, value in parsed.items():
+                    if key and value is not None:
+                        headers[str(key)] = str(value)
+        return headers
+
     def _url(self, path: str) -> str:
         return f"{self._api_base_url()}{path}"
+
+    def _join_url(self, base_url: str, path: str) -> str:
+        base = str(base_url or "").rstrip("/")
+        suffix = path if path.startswith("/") else f"/{path}"
+        return f"{base}{suffix}"
 
     def _api_base_url(self) -> str:
         base_url = str(self._config["base_url"]).rstrip("/")
@@ -386,34 +531,37 @@ class AiManusAdapter:
             raise AiManusAuthRequired(self.auth_required_payload()["detail"])
 
     def _up_command(self, *, build: bool) -> list[str]:
-        command = [str(self._dev_script_path()), "up", "-d"]
+        command = self._compose_command("up", "-d", "--no-deps")
         if build:
             command.append("--build")
+        command.extend(["mongodb", "redis", "backend", "frontend"])
         return command
+
+    def _compose_command(self, *args: str) -> list[str]:
+        docker = shutil.which("docker") or "/usr/local/bin/docker"
+        return [docker, "compose", "-f", str(AI_MANUS_COMPOSE_PATH), *args]
 
     def _dev_script_path(self) -> Path:
         return AI_MANUS_PROJECT_DIR / "dev.sh"
 
     def _spawn_runtime_command(self, action: str, command: list[str]) -> dict[str, Any]:
-        if not AI_MANUS_PROJECT_DIR.exists():
-            return {
-                "action": action,
-                "status": "unavailable",
-                "detail": f"ai-manus project not found at {AI_MANUS_PROJECT_DIR}",
-            }
-        dev_script = self._dev_script_path()
-        if not dev_script.exists():
-            return {
-                "action": action,
-                "status": "unavailable",
-                "detail": f"ai-manus dev.sh not found at {dev_script}",
-            }
+        unavailable = self._runtime_unavailable(action)
+        if unavailable is not None:
+            return unavailable
 
         if action in {"start", "restart"}:
             self._ensure_runtime_env()
 
         AI_MANUS_RUNTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         try:
+            log_event(
+                logger,
+                "adapter_subprocess_started",
+                adapter="ai-manus",
+                action=action,
+                command=self._display_command(command),
+                cwd=str(AI_MANUS_PROJECT_DIR),
+            )
             with AI_MANUS_RUNTIME_LOG_PATH.open("a", encoding="utf-8") as log:
                 log.write(f"\n$ {' '.join(self._display_command(command))}\n")
                 process = subprocess.Popen(
@@ -424,6 +572,13 @@ class AiManusAdapter:
                     start_new_session=True,
                 )
         except OSError as exc:
+            log_event(
+                logger,
+                "adapter_subprocess_failed",
+                adapter="ai-manus",
+                action=action,
+                error_type=exc.__class__.__name__,
+            )
             return {
                 "action": action,
                 "status": "unavailable",
@@ -446,6 +601,105 @@ class AiManusAdapter:
             "cwd": str(AI_MANUS_PROJECT_DIR),
             "log_path": str(AI_MANUS_RUNTIME_LOG_PATH),
         }
+
+    def _run_runtime_command(self, action: str, command: list[str], *, timeout_seconds: float) -> dict[str, Any]:
+        unavailable = self._runtime_unavailable(action)
+        if unavailable is not None:
+            return unavailable
+
+        if action in {"start", "restart"}:
+            self._ensure_runtime_env()
+
+        AI_MANUS_RUNTIME_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        display_command = self._display_command(command)
+        try:
+            log_event(
+                logger,
+                "adapter_subprocess_started",
+                adapter="ai-manus",
+                action=action,
+                command=display_command,
+                cwd=str(AI_MANUS_PROJECT_DIR),
+                wait=True,
+                timeout_seconds=timeout_seconds,
+            )
+            with AI_MANUS_RUNTIME_LOG_PATH.open("a", encoding="utf-8") as log:
+                log.write(f"\n$ {' '.join(display_command)}\n")
+                completed = subprocess.run(
+                    command,
+                    cwd=str(AI_MANUS_PROJECT_DIR),
+                    stdout=log,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+        except subprocess.TimeoutExpired as exc:
+            log_event(
+                logger,
+                "adapter_subprocess_failed",
+                adapter="ai-manus",
+                action=action,
+                error_type=exc.__class__.__name__,
+            )
+            return {
+                "action": action,
+                "status": "timeout",
+                "detail": f"ai-manus runtime command timed out after {timeout_seconds:.0f}s.",
+                "command": display_command,
+                "cwd": str(AI_MANUS_PROJECT_DIR),
+                "log_path": str(AI_MANUS_RUNTIME_LOG_PATH),
+            }
+        except OSError as exc:
+            log_event(
+                logger,
+                "adapter_subprocess_failed",
+                adapter="ai-manus",
+                action=action,
+                error_type=exc.__class__.__name__,
+            )
+            return {
+                "action": action,
+                "status": "unavailable",
+                "detail": f"Could not run ai-manus runtime command: {exc}",
+                "command": display_command,
+                "cwd": str(AI_MANUS_PROJECT_DIR),
+                "log_path": str(AI_MANUS_RUNTIME_LOG_PATH),
+            }
+
+        ok = completed.returncode == 0
+        if ok and action in {"start", "restart"}:
+            self._restart_required = False
+        log_event(
+            logger,
+            "adapter_subprocess_completed",
+            adapter="ai-manus",
+            action=action,
+            returncode=completed.returncode,
+        )
+        return {
+            "action": action,
+            "status": "completed" if ok else "failed",
+            "detail": "ai-manus backend container recreated." if ok else f"ai-manus runtime command failed with exit code {completed.returncode}.",
+            "returncode": completed.returncode,
+            "command": display_command,
+            "cwd": str(AI_MANUS_PROJECT_DIR),
+            "log_path": str(AI_MANUS_RUNTIME_LOG_PATH),
+        }
+
+    def _runtime_unavailable(self, action: str) -> dict[str, Any] | None:
+        if not AI_MANUS_PROJECT_DIR.exists():
+            return {
+                "action": action,
+                "status": "unavailable",
+                "detail": f"ai-manus project not found at {AI_MANUS_PROJECT_DIR}",
+            }
+        if not AI_MANUS_COMPOSE_PATH.exists():
+            return {
+                "action": action,
+                "status": "unavailable",
+                "detail": f"ai-manus compose file not found at {AI_MANUS_COMPOSE_PATH}",
+            }
+        return None
 
     def _ensure_runtime_env(self) -> None:
         if AI_MANUS_ENV_PATH.exists():
@@ -593,6 +847,18 @@ class AiManusAdapter:
         if api_key:
             message = message.replace(str(api_key), "[redacted]")
         return message
+
+    def _safe_external_url(self, value: str) -> str:
+        parsed = urlparse(value)
+        if not parsed.scheme or not parsed.netloc:
+            return value
+        return urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+
+    def _redact_model_error(self, message: str, *, api_key: str | None) -> str:
+        text = message
+        if api_key:
+            text = text.replace(api_key, "[redacted]")
+        return self._redact(text)
 
     def _sse_from_buffer(self, buffer: dict[str, str]) -> dict[str, Any] | None:
         if not buffer:

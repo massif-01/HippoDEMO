@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from ..logging_config import log_event
 from ..models import ServiceStatus, now_iso
 
 
 ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 LOCAL_BIN = PROJECT_DIR / "OpenChronicle" / ".venv" / "bin" / "openchronicle"
+logger = logging.getLogger("orchestrator.adapters.openchronicle")
 
 
 @dataclass
@@ -92,6 +95,7 @@ class OpenChronicleAdapter:
     async def _run(self, action: str, args: list[str], *, timeout: float) -> OpenChronicleCommandResult:
         executable = self.executable()
         if not executable:
+            log_event(logger, "adapter_subprocess_unavailable", adapter="openchronicle", action=action)
             return OpenChronicleCommandResult(
                 action=action,
                 ok=False,
@@ -100,6 +104,15 @@ class OpenChronicleAdapter:
             )
 
         try:
+            log_event(
+                logger,
+                "adapter_subprocess_started",
+                adapter="openchronicle",
+                action=action,
+                executable=executable,
+                command_args=args,
+                timeout_seconds=timeout,
+            )
             proc = await asyncio.create_subprocess_exec(
                 executable,
                 *args,
@@ -110,6 +123,15 @@ class OpenChronicleAdapter:
             stdout_bytes, stderr_bytes = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             stdout = self._summarize(stdout_bytes.decode(errors="replace"))
             stderr = self._summarize(stderr_bytes.decode(errors="replace"))
+            log_event(
+                logger,
+                "adapter_subprocess_completed",
+                adapter="openchronicle",
+                action=action,
+                returncode=proc.returncode,
+                stdout_chars=len(stdout),
+                stderr_chars=len(stderr),
+            )
             return OpenChronicleCommandResult(
                 action=action,
                 ok=proc.returncode == 0,
@@ -122,6 +144,13 @@ class OpenChronicleAdapter:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             await proc.wait()
+            log_event(
+                logger,
+                "adapter_subprocess_timeout",
+                adapter="openchronicle",
+                action=action,
+                timeout_seconds=timeout,
+            )
             return OpenChronicleCommandResult(
                 action=action,
                 ok=False,
@@ -130,6 +159,13 @@ class OpenChronicleAdapter:
                 executable=executable,
             )
         except OSError as exc:
+            log_event(
+                logger,
+                "adapter_subprocess_failed",
+                adapter="openchronicle",
+                action=action,
+                error_type=exc.__class__.__name__,
+            )
             return OpenChronicleCommandResult(
                 action=action,
                 ok=False,

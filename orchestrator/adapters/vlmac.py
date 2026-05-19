@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ..logging_config import log_event
 from ..models import ServiceStatus, now_iso
 from .basic_memory import basic_memory_adapter
 
@@ -31,6 +33,7 @@ DEFAULT_VLM_OPENAI_BASE_URL = "http://127.0.0.1:58000/v1"
 DEFAULT_VLM_MODEL = "RM-01 VLM"
 STATUS_TIMEOUT_SECONDS = 3.0
 STARTUP_TIMEOUT_SECONDS = 8.0
+logger = logging.getLogger("orchestrator.adapters.vlmac")
 
 
 @dataclass
@@ -240,6 +243,14 @@ class VlmacAdapter:
                 env["VLLM_API_KEY"] = str(self._vlm_api_key())
             command = [python, "-m", "uvicorn", "server:app", "--host", host, "--port", port]
             try:
+                log_event(
+                    logger,
+                    "adapter_subprocess_started",
+                    adapter="vlmac",
+                    action="start",
+                    command=["python", "-m", "uvicorn", "server:app", "--host", host, "--port", port],
+                    cwd=str(VLMAC_DIR),
+                )
                 with VLMAC_LOG_PATH.open("ab") as log:
                     self._process = subprocess.Popen(
                         command,
@@ -250,6 +261,13 @@ class VlmacAdapter:
                         stdin=subprocess.DEVNULL,
                     )
             except Exception as exc:
+                log_event(
+                    logger,
+                    "adapter_subprocess_failed",
+                    adapter="vlmac",
+                    action="start",
+                    error_type=exc.__class__.__name__,
+                )
                 return ServiceStatus(name="vlmac", status="error", detail=f"start failed: {exc}")
 
             VLMAC_PID_PATH.write_text(f"{self._process.pid}\n", encoding="utf-8")
@@ -321,13 +339,45 @@ class VlmacAdapter:
 
     async def _get_json(self, path: str) -> dict[str, Any] | None:
         try:
+            log_event(
+                logger,
+                "adapter_http_started",
+                adapter="vlmac",
+                method="GET",
+                path=path,
+                timeout_seconds=STATUS_TIMEOUT_SECONDS,
+            )
             async with httpx.AsyncClient(timeout=STATUS_TIMEOUT_SECONDS) as client:
                 response = await client.get(f"{self.base_url}{path}")
             if response.status_code != 200:
+                log_event(
+                    logger,
+                    "adapter_http_failed",
+                    adapter="vlmac",
+                    method="GET",
+                    path=path,
+                    status_code=response.status_code,
+                )
                 return None
             data = response.json()
+            log_event(
+                logger,
+                "adapter_http_completed",
+                adapter="vlmac",
+                method="GET",
+                path=path,
+                status_code=response.status_code,
+            )
             return data if isinstance(data, dict) else None
-        except Exception:
+        except Exception as exc:
+            log_event(
+                logger,
+                "adapter_http_failed",
+                adapter="vlmac",
+                method="GET",
+                path=path,
+                error_type=exc.__class__.__name__,
+            )
             return None
 
     def _project_path(self) -> str | None:

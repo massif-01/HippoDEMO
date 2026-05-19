@@ -1,7 +1,7 @@
 # HippoDEMO Changelog
 
 > 本文档记录 HippoDEMO 从项目调研、PRD 定义、架构设计到 Frontend + Orchestrator 初版实现的完整构建过程。  
-> 当前记录日期：2026-05-12。
+> 当前记录日期：2026-05-18。
 
 ## 当前结论
 
@@ -19,6 +19,40 @@ HippoDEMO 已经从“多个既有项目的能力组合设想”推进到一个�
 - OpenChronicle 的 writer/reducer/classifier 仍需要配置可用模型 provider，目前默认模型会因为缺少 API key 报 `AuthenticationError`。
 - ownscribe、vlmac、cua-driver、basic-memory 还没有全部 real adapter 化。
 - UI 已有 Jarvis HUD 方向，但仍可以继续做视觉 polish 和交互细化。
+
+## 2026-05-18 启动链路、设置可用性与交互反馈修复
+
+- App 启动链路补强：`AppDelegate` 和 `AppStateStore.bootstrap()` 都会确保本地 Orchestrator 启动，并增加 bootstrapping guard，避免并发 refresh/启动造成状态混乱。
+- Orchestrator 启动日志改为落到项目 `.runtime/orchestrator-app.log`，并新增 Swift 侧 `AppLog`，把 app 启动、Orchestrator health、HTTP/SSE 请求等写入 `.runtime/logs`，便于定位“启动了但 UI 没报告”的问题。
+- Orchestrator 新增诊断日志 API：`GET /diagnostics/logs`、`GET /diagnostics/logs/{name}`、`GET /diagnostics/session/{session_id}/logs`，并限制为本地 origin 访问。
+- 各 real adapter 增加结构化事件日志：OpenChronicle、ownscribe、vlmac、cua-driver、basic-memory、Project_Cortex、ai-manus 的 HTTP / subprocess / runtime 操作都能留下可追踪记录。
+- Dashboard Settings 修复 tab 内容：`General`、`Services`、`Recording`、`Permissions`、`About` 现在分别展示对应配置，不再是按钮存在但内容不可用。
+- Services 列表修复 chevron 行为：服务行现在可点击展开，展示 detail、status、identifier，避免“看起来能点但点不开”。
+- Diagnostics 行从占位提示改为可打开 `.runtime/logs` 文件夹。
+- ai-manus 设置补全：Dashboard 中新增 Backend URL、Frontend URL、`AUTH_PROVIDER`、`API_BASE`、`MODEL_NAME`、`API_KEY`、`TEMPERATURE`、`MAX_TOKENS`、`EXTRA_HEADERS`、timeout 等配置项，并提供 `Save`、`Validate model`、`Refresh`。
+- Orchestrator 新增 `POST /integrations/ai-manus/model/validate`，会读取 ai-manus `.env`，用 `API_BASE /models` 验证模型 provider 可达性和 `MODEL_NAME` 是否可见，错误信息会脱敏。
+- Recording 设置补全 ownscribe ASR/Summary provider 配置，新增 `Save`、`Validate models`、`Refresh`，并把模型 preflight 结果直接显示在设置页。
+- 修复密钥输入体验：ai-manus、ownscribe ASR、ownscribe Summary、vlmac 的 API key 在 `Save` 或 `Validate` 后不再清空当前输入框；后端仍不回传明文密钥，只显示 configured 状态。
+- 全局按钮按压反馈增强：`HippoPushButtonStyle` 增加明显的按压遮罩、亮度变化、阴影收起和缩放；新增 `HippoPressFeedbackButtonStyle`，替换 Dashboard、Popover、Chat、Settings 中自定义 `.plain` / `.borderless` 按钮，降低用户不确定是否点击成功的问题。
+- Hippo Chat 页面按 ai-manus 原版对话窗口方向收窄重做：中心列固定在 768px，上方线程标题改为紧凑 header，用户消息改为右侧白色描边气泡，Manus 回复改为左侧无气泡正文，空的 Plan / Tools 面板不再占位展示。
+- Chat SSE 的 `error` 事件现在会进入对话流，避免模型调用失败时 UI 只显示用户消息、不显示 Manus 失败原因。
+- Chat 发送/停止交互修复：发送后输入框保持可编辑并自动回到焦点，只禁用“再次发送”；`Stop` 现在会取消当前 SSE 任务、立即释放运行态，再调用后端 stop，避免按钮看得到但停不下来。
+- 恢复 Chat 空白首页的 “What should Hippo do?” 大标题和原来的入口氛围，同时保留对话态的 ai-manus 风格布局。
+- Orchestrator 修复本地空 Chat 线程 detail 查询：线程还没有远端 `manus_session_id` 时不再误请求 `/sessions/{local_thread_id}`，而是返回 `remote_status=not_created`。
+- App 启动 Orchestrator 的 launcher 改为直接启动 `orchestrator-runtime/bin/python -m uvicorn ...`，不再经过 `/bin/zsh -lc`，避免 login shell 读取 `/private/etc/zprofile` 卡住；同时增加 `preparing/launching` 日志，让 `AppDelegate` 持有启动 Task，并移除启动关键路径里的 `NSLog` / 深度 executable 探测，避免 macOS 日志或 symlink 解析异常时卡住 backend launch。
+- 日志排查结论：22:22 和 22:24 的测试均成功创建了 ai-manus 远端 session 并启动 `/chat` SSE，但 ai-manus 后端模型调用失败，错误为 OpenAI-compatible provider 的 `APIConnectionError: Connection error.`；当前容器网络已可达 DashScope `/models`，但仍需要一次新的对话返回 assistant 内容才能确认模型真实调用成功。
+- 23:06 “你好”测试复盘：本地 Chat 线程已创建远端 `manus_session_id`，但运行中的 ai-manus backend 容器仍持有旧环境变量 `API_BASE=http://mockserver:8090/v1`、`MODEL_NAME=deepseek-chat`，而 `.env` 已保存为 DashScope/Qwen 配置，导致 LangChain/OpenAI SDK DNS 解析 `mockserver` 失败并返回 `APIConnectionError: Connection error.`。
+- ai-manus 模型配置保存后现在会自动触发 runtime `restart` / Docker recreate，并等待 backend 恢复 online，避免 UI 显示保存成功但容器继续使用旧 `API_BASE/MODEL_NAME`。
+- ai-manus Docker compose 现在显式发布 backend `8000:8000`，Orchestrator `base_url=http://127.0.0.1:8000` 才能真正访问容器里的 `/api/v1`；同时把默认/frontend 配置对齐到 compose 实际暴露的 `http://127.0.0.1:5173`。
+- Chat stream 现在会在创建 ai-manus remote session 后立即推送 `thread` 事件，Swift 端收到后同步 `manus_session_id`、status、title 等线程字段；流结束后还会重新拉取线程详情，避免页面继续显示 `not created / local draft`。
+- Chat 视觉继续收窄：用户短消息气泡按内容宽度显示，不再撑满整列；线程标题读取 Optional 字段时去掉 Swift `Optional("...")` 残留引号；内部 `message_ask_user/message_notify_user` 工具调用不再作为 Tools 面板展示，真实工具调用改为轻量 activity rows。
+- Chat composer 修复持续对话输入：占位文字改为点击穿透，不再挡住底层 `NSTextView`；模型回复结束或 Stop 后会重新聚焦输入框，避免用户无法继续输入下一轮。
+- Chat 对话态补齐 ai-manus 沙盒电脑入口：检测到远端 Manus session 后显示 `Computer` / 显示器按钮；只有用户主动点击时才请求 sandbox access，并以浮动 viewer 形式打开 ai-manus `/chat/{session}?vnc=1` VNC/takeover 页面，不再默认占用右侧分栏。
+- 移除 composer 内无语义的工具图标堆叠和 `+N` 计数，工具执行数量只保留在 Tool activity 面板中展示，避免把执行日志误当成可点击输入工具；显示器按钮现在专门作为沙盒电脑入口。
+- 本地 app bundle 的 Info.plist 增加 `NSAppTransportSecurity.NSAllowsLocalNetworking=true`，允许嵌入本机 `127.0.0.1` ai-manus frontend/VNC 页面。
+- ai-manus `Save` 模型配置现在会同步强制重建 backend Docker：执行 `docker compose -f ai-manus/docker-compose.yml up -d --no-deps --force-recreate backend`，确保运行中的容器读取新的 `API_BASE/MODEL_NAME`；如果重建失败，保存接口直接报错，不再让 UI 显示已应用。
+- 修复 ai-manus 配置保存后仍走旧 DashScope/Aliyun provider 的问题：旧逻辑只写入 `.env`，随后异步调用 `dev.sh up -d --force-recreate`，但该命令会被 `claw` 镜像拉取失败阻断，并且 UI 仍可能显示保存成功；现在重启命令只针对 backend，避免无关服务影响模型配置生效。
+- 验证：`swift build --product HippoJarvis`、`script/build_and_run.sh --verify`、`orchestrator-runtime/bin/python -m pytest orchestrator/tests` 均通过。
 
 ## 2026-05-14 ai-manus Runtime 启动按钮
 

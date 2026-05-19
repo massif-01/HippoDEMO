@@ -119,6 +119,25 @@ private struct DashboardSidebar: View {
                     .tag(DashboardRouteID.sessions)
             }
 
+            if route == .chat {
+                Section("Tasks") {
+                    chatNewTaskRow
+                }
+
+                Section("All Tasks") {
+                    if store.manusThreads.isEmpty {
+                        Text("No tasks yet")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 4)
+                    } else {
+                        ForEach(Array(store.manusThreads.prefix(8))) { thread in
+                            manusThreadRow(thread)
+                        }
+                    }
+                }
+            }
+
             Section("Library") {
                 ForEach(store.snapshot.skills.prefix(6)) { skill in
                     skillRow(skill)
@@ -217,6 +236,103 @@ private struct DashboardSidebar: View {
         .accessibilityLabel(item.title)
     }
 
+    private var chatNewTaskRow: some View {
+        Button {
+            route = .chat
+            Task { await store.newChatThread() }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 13, weight: .regular))
+                    .frame(width: 20)
+                Text("New Task")
+                    .font(.system(size: 13, weight: .medium))
+                Spacer(minLength: 0)
+            }
+            .frame(height: 28)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 7, pressedScale: 0.98, overlayOpacity: 0.10))
+        .accessibilityLabel("New Task")
+    }
+
+    private func manusThreadRow(_ thread: ManusThread) -> some View {
+        Button {
+            route = .chat
+            Task { await store.loadManusThread(thread) }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: manusThreadIcon(thread))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(manusThreadColor(thread))
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(manusThreadTitle(thread))
+                        .font(.system(size: 12, weight: store.currentManusThread?.id == thread.id ? .semibold : .medium))
+                        .lineLimit(1)
+                    Text(manusThreadSubtitle(thread))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
+                if let unread = thread.unreadMessageCount, unread > 0 {
+                    Text("\(unread)")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(minWidth: 18, minHeight: 18)
+                        .background(Color.red.opacity(0.85), in: Circle())
+                }
+            }
+            .padding(.horizontal, 6)
+            .padding(.vertical, 5)
+            .background(store.currentManusThread?.id == thread.id ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.98, overlayOpacity: 0.10))
+        .accessibilityLabel(manusThreadTitle(thread))
+    }
+
+    private func manusThreadTitle(_ thread: ManusThread) -> String {
+        if let title = thread.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return title
+        }
+        return String(thread.sessionId.suffix(8))
+    }
+
+    private func manusThreadSubtitle(_ thread: ManusThread) -> String {
+        let status = thread.status.replacingOccurrences(of: "_", with: " ")
+        if let latest = thread.latestMessage?.trimmingCharacters(in: .whitespacesAndNewlines), !latest.isEmpty {
+            return "\(status) · \(latest)"
+        }
+        if let remote = thread.manusSessionId, !remote.isEmpty {
+            return "\(status) · Manus \(String(remote.suffix(8)))"
+        }
+        return status.isEmpty ? "local draft" : status
+    }
+
+    private func manusThreadIcon(_ thread: ManusThread) -> String {
+        let status = thread.status.lowercased()
+        if status.contains("running") || status.contains("pending") || status.contains("stream") {
+            return "progress.indicator"
+        }
+        if status.contains("error") || status.contains("fail") {
+            return "exclamationmark.triangle.fill"
+        }
+        return "bubble.left.and.bubble.right.fill"
+    }
+
+    private func manusThreadColor(_ thread: ManusThread) -> Color {
+        let status = thread.status.lowercased()
+        if status.contains("running") || status.contains("pending") || status.contains("stream") {
+            return .blue
+        }
+        if status.contains("error") || status.contains("fail") {
+            return .orange
+        }
+        return .secondary
+    }
+
     private func skillRow(_ skill: SkillRecord) -> some View {
         HStack(spacing: 6) {
             Button {
@@ -237,7 +353,7 @@ private struct DashboardSidebar: View {
                 }
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 6, pressedScale: 0.98, overlayOpacity: 0.10))
             .accessibilityLabel(skill.name)
 
             Button(role: .destructive) {
@@ -249,7 +365,7 @@ private struct DashboardSidebar: View {
                     .frame(width: 22, height: 22)
                     .background(HippoTheme.subtleFill, in: RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 5, pressedScale: 0.88, overlayOpacity: 0.16))
             .help("Delete skill")
         }
         .frame(height: 32)
@@ -336,7 +452,7 @@ struct DashboardPageShell<Toolbar: View, Content: View>: View {
                             .font(.system(size: 11, weight: .semibold))
                             .frame(width: 22, height: 22)
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 6, pressedScale: 0.88, overlayOpacity: 0.16))
                     .foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 14)
@@ -402,7 +518,7 @@ struct DashboardSegmented: View {
                 .frame(height: 24)
                 .background(cellBackground(selected: selected))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 5, pressedScale: 0.96, overlayOpacity: 0.14))
         .foregroundStyle(selected ? .primary : .secondary)
         .accessibilityLabel(item)
         .accessibilityValue(selected ? "Selected" : "")
@@ -1285,6 +1401,23 @@ private struct DashboardSettingsView: View {
     @EnvironmentObject private var store: AppStateStore
     @AppStorage("orchestratorBaseURL") private var orchestratorBaseURL = "http://127.0.0.1:8787"
     @State private var tab = "General"
+    @State private var asrBaseURLDraft = ""
+    @State private var asrModelDraft = ""
+    @State private var asrKeyDraft = ""
+    @State private var summaryBaseURLDraft = ""
+    @State private var summaryModelDraft = ""
+    @State private var summaryKeyDraft = ""
+    @State private var aiManusBaseURLDraft = ""
+    @State private var aiManusFrontendURLDraft = ""
+    @State private var aiManusAuthProviderDraft = ""
+    @State private var aiManusTimeoutDraft = ""
+    @State private var aiManusAPIBaseDraft = ""
+    @State private var aiManusModelDraft = ""
+    @State private var aiManusKeyDraft = ""
+    @State private var aiManusTemperatureDraft = ""
+    @State private var aiManusMaxTokensDraft = ""
+    @State private var aiManusExtraHeadersDraft = ""
+    @State private var expandedServiceIDs: Set<String> = []
 
     var body: some View {
         DashboardPageShell(
@@ -1295,19 +1428,13 @@ private struct DashboardSettingsView: View {
             Spacer()
             HippoSymbolButton(systemName: "arrow.clockwise", title: "Refresh") {
                 Task {
-                    await store.refresh()
-                    await store.refreshOwnscribeConsole()
+                    await refreshSettings()
                 }
             }
         } content: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
-                    orchestratorSection
-                    servicesSection
-                    openChronicleSection
-                    cuaDriverSection
-                    permissionsSection
-                    aboutSection
+                    settingsContent
                 }
                 .frame(maxWidth: 760)
                 .padding(.vertical, 24)
@@ -1315,8 +1442,34 @@ private struct DashboardSettingsView: View {
                 .frame(maxWidth: .infinity)
             }
             .task {
-                await store.refreshOwnscribeConsole()
+                await refreshSettings()
             }
+            .onChange(of: store.ownscribeConfig) {
+                syncProviderDrafts()
+            }
+            .onChange(of: store.aiManusConfig) {
+                syncAiManusDrafts()
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var settingsContent: some View {
+        switch tab {
+        case "Services":
+            servicesSection
+            openChronicleSection
+            cuaDriverSection
+        case "Recording":
+            recordingSection
+            openChronicleSection
+        case "Permissions":
+            permissionsSection
+        case "About":
+            aboutSection
+        default:
+            orchestratorSection
+            aiManusSection
         }
     }
 
@@ -1346,11 +1499,226 @@ private struct DashboardSettingsView: View {
         }
     }
 
+    private var aiManusSection: some View {
+        formSection("ai-manus", footnote: aiManusRuntimeDetail) {
+            formRow("Configuration", sub: aiManusValidationDetail) {
+                HStack(spacing: 6) {
+                    commandButton("Save") {
+                        await saveAiManusConfig()
+                    }
+                    commandButton("Validate model") {
+                        await validateAiManusModelConfig()
+                    }
+                    commandButton("Refresh") {
+                        await store.refreshManus()
+                        syncAiManusDrafts()
+                    }
+                }
+            }
+            HippoHairline()
+            formRow("Runtime", sub: aiManusService.map { store.serviceDetail($0.detail, status: $0.status) } ?? store.aiManusStatus.detail ?? "Not reported") {
+                HStack(spacing: 6) {
+                    commandButton("Start") {
+                        await store.aiManusRuntimeStart()
+                        await store.refreshManus()
+                        syncAiManusDrafts()
+                    }
+                    commandButton("Restart") {
+                        await store.aiManusRuntimeRestart()
+                        await store.refreshManus()
+                        syncAiManusDrafts()
+                    }
+                    commandButton("Stop", variant: .destructive) {
+                        await store.aiManusRuntimeStop()
+                        await store.refreshManus()
+                        syncAiManusDrafts()
+                    }
+                }
+            }
+            HippoHairline()
+            formRow("Backend URL", sub: "Orchestrator calls this ai-manus API") {
+                providerField("Backend URL", text: $aiManusBaseURLDraft)
+            }
+            HippoHairline()
+            formRow("Frontend URL", sub: "Browser surface for ai-manus") {
+                providerField("Frontend URL", text: $aiManusFrontendURLDraft)
+            }
+            HippoHairline()
+            formRow("AUTH_PROVIDER") {
+                providerField("AUTH_PROVIDER", text: $aiManusAuthProviderDraft)
+            }
+            HippoHairline()
+            formRow("API_BASE") {
+                providerField("API_BASE", text: $aiManusAPIBaseDraft)
+            }
+            HippoHairline()
+            formRow("MODEL_NAME") {
+                providerField("MODEL_NAME", text: $aiManusModelDraft)
+            }
+            HippoHairline()
+            formRow("API_KEY", sub: store.aiManusConfig.apiKeyConfigured == true ? "Configured" : "Not configured") {
+                providerSecureField("API_KEY", text: $aiManusKeyDraft)
+            }
+            HippoHairline()
+            formRow("TEMPERATURE") {
+                providerField("TEMPERATURE", text: $aiManusTemperatureDraft)
+            }
+            HippoHairline()
+            formRow("MAX_TOKENS") {
+                providerField("MAX_TOKENS", text: $aiManusMaxTokensDraft)
+            }
+            HippoHairline()
+            formRow("EXTRA_HEADERS", sub: store.aiManusConfig.extraHeadersConfigured == true ? "Configured" : "Optional JSON") {
+                providerField("EXTRA_HEADERS", text: $aiManusExtraHeadersDraft)
+            }
+            HippoHairline()
+            formRow("Timeout seconds") {
+                providerField("Timeout seconds", text: $aiManusTimeoutDraft)
+            }
+            HippoHairline()
+            formRow("Actions", sub: aiManusRuntimeCommandDetail) {
+                HStack(spacing: 6) {
+                    commandButton("Logs") {
+                        await store.refreshAiManusRuntimeLogs()
+                    }
+                }
+            }
+            if !aiManusRuntimeLogLines.isEmpty {
+                HippoHairline()
+                formRow("Runtime log") {
+                    VStack(alignment: .trailing, spacing: 3) {
+                        ForEach(Array(aiManusRuntimeLogLines.enumerated()), id: \.offset) { _, line in
+                            Text(line)
+                                .font(.system(size: 10, design: .monospaced))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+                    .frame(width: 360, alignment: .trailing)
+                }
+            }
+        }
+    }
+
+    private var recordingSection: some View {
+        formSection("Recording", footnote: "ownscribe controls system audio, microphone capture, ASR, and summary providers.") {
+            formRow("Service", sub: ownscribeService.map { store.serviceDetail($0.detail, status: $0.status) } ?? "Not reported") {
+                HStack(spacing: 6) {
+                    commandButton("Save") { await saveProviderConfig() }
+                    commandButton("Validate models") {
+                        await saveProviderConfig()
+                        await store.refreshOwnscribeConsole(networkPreflight: true)
+                        syncProviderDrafts()
+                    }
+                    commandButton("Refresh") { await store.refreshOwnscribeConsole() }
+                }
+            }
+            HippoHairline()
+            formRow("Audio source") {
+                Picker("Audio source", selection: Binding(
+                    get: { store.ownscribeConfig.audioSource },
+                    set: { nextSource in
+                        Task { await store.updateOwnscribeConfig(audioSource: nextSource) }
+                    }
+                )) {
+                    ForEach(OwnscribeAudioSource.allCases) { source in
+                        Text(audioSourceLabel(source))
+                            .tag(source)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 280)
+                .disabled(store.isBusy)
+            }
+            HippoHairline()
+            formRow("Microphone", sub: store.ownscribeConfig.audioSource == .system ? "Disabled for system-only capture" : nil) {
+                Picker("Microphone", selection: Binding(
+                    get: { store.ownscribeConfig.micDevice ?? "" },
+                    set: { nextDevice in
+                        Task { await store.updateOwnscribeConfig(micDevice: nextDevice) }
+                    }
+                )) {
+                    Text("Default")
+                        .tag("")
+                    ForEach(store.ownscribeDevices.devices) { device in
+                        Text(device.isDefault ? "\(device.name) - default" : device.name)
+                            .tag(device.name)
+                    }
+                }
+                .frame(width: 260)
+                .disabled(store.isBusy || store.ownscribeConfig.audioSource == .system)
+            }
+            HippoHairline()
+            formRow("ASR Base URL") {
+                providerField("ASR Base URL", text: $asrBaseURLDraft)
+            }
+            HippoHairline()
+            formRow("ASR Model") {
+                providerField("ASR Model", text: $asrModelDraft)
+            }
+            HippoHairline()
+            formRow("ASR API Key", sub: store.ownscribeConfig.asrApiKeyConfigured == true ? "Configured" : "Not configured") {
+                providerSecureField("ASR API Key", text: $asrKeyDraft)
+            }
+            HippoHairline()
+            formRow("Summary Base URL") {
+                providerField("Summary Base URL", text: $summaryBaseURLDraft)
+            }
+            HippoHairline()
+            formRow("Summary Model") {
+                providerField("Summary Model", text: $summaryModelDraft)
+            }
+            HippoHairline()
+            formRow("Summary API Key", sub: store.ownscribeConfig.summaryApiKeyConfigured == true ? "Configured" : "Not configured") {
+                providerSecureField("Summary API Key", text: $summaryKeyDraft)
+            }
+            HippoHairline()
+            formRow("Actions") {
+                HStack(spacing: 6) {
+                    commandButton("Save provider") {
+                        await saveProviderConfig()
+                    }
+                    commandButton("Validate models") {
+                        await saveProviderConfig()
+                        await store.refreshOwnscribeConsole(networkPreflight: true)
+                        syncProviderDrafts()
+                    }
+                    commandButton("Refresh") {
+                        await store.refreshOwnscribeConsole()
+                        syncProviderDrafts()
+                    }
+                }
+            }
+            if !store.ownscribePreflight.checks.isEmpty {
+                HippoHairline()
+                VStack(spacing: 0) {
+                    ForEach(store.ownscribePreflight.checks) { check in
+                        formRow(check.name.replacingOccurrences(of: "_", with: " ").capitalized, sub: check.detail) {
+                            HippoCapsuleLabel(
+                                title: check.ok ? "OK" : "Needs attention",
+                                color: check.ok ? .green : .orange,
+                                systemImage: check.ok ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
+                            )
+                        }
+                        if check.id != store.ownscribePreflight.checks.last?.id {
+                            HippoHairline()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private var servicesSection: some View {
-        formSection("Services") {
-            ForEach(store.snapshot.services.isEmpty ? placeholderServices : store.snapshot.services) { service in
+        let services = store.snapshot.services.isEmpty ? placeholderServices : store.snapshot.services
+
+        return formSection("Services", footnote: "Click a service row to expand runtime details.") {
+            ForEach(Array(services.enumerated()), id: \.element.id) { index, service in
                 serviceFormRow(service)
-                if service.id != (store.snapshot.services.isEmpty ? placeholderServices : store.snapshot.services).last?.id {
+                if expandedServiceIDs.contains(service.id) {
+                    serviceExpandedRows(service)
+                }
+                if index < services.count - 1 {
                     HippoHairline()
                 }
             }
@@ -1411,9 +1779,9 @@ private struct DashboardSettingsView: View {
                     .foregroundStyle(.secondary)
             }
             HippoHairline()
-            formRow("Diagnostics", sub: "Export runtime log + state snapshot") {
-                Button("Export...") {
-                    store.lastError = "Diagnostics export is not wired in this demo build yet."
+            formRow("Diagnostics", sub: "Open runtime logs folder") {
+                Button("Open Logs") {
+                    openDiagnosticsFolder()
                 }
                     .buttonStyle(HippoPushButtonStyle(.neutral, size: .sm))
             }
@@ -1431,6 +1799,138 @@ private struct DashboardSettingsView: View {
 
     private var cuaDriverService: ServiceStatus? {
         store.snapshot.services.first { $0.name.localizedCaseInsensitiveCompare("cua-driver") == .orderedSame }
+    }
+
+    private var ownscribeService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.localizedCaseInsensitiveCompare("ownscribe") == .orderedSame }
+    }
+
+    private var aiManusService: ServiceStatus? {
+        store.snapshot.services.first { $0.name.localizedCaseInsensitiveCompare("ai-manus") == .orderedSame }
+    }
+
+    private var aiManusRuntimeDetail: String {
+        let env = store.aiManusConfig.envPath ?? "ai-manus/.env"
+        let source = store.aiManusConfig.envExists == true ? "env" : (store.aiManusConfig.envSource ?? "missing")
+        let restart = store.aiManusConfig.restartRequired == true ? " - restart ai-manus backend to apply" : ""
+        return "\(env) - \(source)\(restart)"
+    }
+
+    private var aiManusValidationDetail: String? {
+        guard let validation = store.aiManusModelValidation else {
+            return "Save writes ai-manus/.env; Validate model probes API_BASE /models."
+        }
+        let status = validation.ok == true ? "OK" : (validation.status ?? "failed")
+        return "\(status) - \(validation.detail ?? "No validation detail.")"
+    }
+
+    private var aiManusRuntimeCommandDetail: String? {
+        guard let command = store.aiManusRuntimeLastCommand else { return nil }
+        let action = command.action ?? "runtime"
+        let status = command.status ?? "unknown"
+        let pid = command.pid.map { " - pid \($0)" } ?? ""
+        return "\(action) \(status)\(pid)"
+    }
+
+    private var aiManusRuntimeLogLines: [String] {
+        let lines = store.aiManusRuntimeLogs.lines
+        if lines.count <= 6 { return lines }
+        return Array(lines.suffix(6))
+    }
+
+    private func refreshSettings() async {
+        await store.bootstrap()
+        await store.refresh()
+        await store.refreshOwnscribeConsole()
+        await store.refreshManus()
+        syncProviderDrafts()
+        syncAiManusDrafts()
+    }
+
+    private func saveProviderConfig() async {
+        await store.updateOwnscribeConfig(
+            asrProvider: "openai-compatible",
+            asrBaseUrl: nonEmpty(asrBaseURLDraft),
+            asrModel: nonEmpty(asrModelDraft),
+            asrApiKey: nonEmpty(asrKeyDraft),
+            summaryProvider: "openai-compatible",
+            summaryBaseUrl: nonEmpty(summaryBaseURLDraft),
+            summaryModel: nonEmpty(summaryModelDraft),
+            summaryApiKey: nonEmpty(summaryKeyDraft)
+        )
+        syncProviderDrafts()
+    }
+
+    private func syncProviderDrafts() {
+        asrBaseURLDraft = store.ownscribeConfig.asrBaseUrl ?? ""
+        asrModelDraft = store.ownscribeConfig.asrModel ?? ""
+        summaryBaseURLDraft = store.ownscribeConfig.summaryBaseUrl ?? ""
+        summaryModelDraft = store.ownscribeConfig.summaryModel ?? ""
+    }
+
+    private func saveAiManusConfig() async {
+        await store.updateAiManusConfig(
+            baseUrl: nonEmpty(aiManusBaseURLDraft),
+            frontendUrl: nonEmpty(aiManusFrontendURLDraft),
+            authProvider: nonEmpty(aiManusAuthProviderDraft),
+            timeoutSeconds: doubleValue(aiManusTimeoutDraft),
+            apiBase: nonEmpty(aiManusAPIBaseDraft),
+            modelName: nonEmpty(aiManusModelDraft),
+            apiKey: nonEmpty(aiManusKeyDraft),
+            temperature: doubleValue(aiManusTemperatureDraft),
+            maxTokens: intValue(aiManusMaxTokensDraft),
+            extraHeaders: nonEmpty(aiManusExtraHeadersDraft)
+        )
+        syncAiManusDrafts()
+    }
+
+    private func validateAiManusModelConfig() async {
+        await saveAiManusConfig()
+        await store.validateAiManusModel()
+        syncAiManusDrafts()
+    }
+
+    private func syncAiManusDrafts() {
+        aiManusBaseURLDraft = store.aiManusConfig.baseUrl ?? ""
+        aiManusFrontendURLDraft = store.aiManusConfig.frontendUrl ?? ""
+        aiManusAuthProviderDraft = store.aiManusConfig.authProvider ?? "none"
+        aiManusTimeoutDraft = store.aiManusConfig.timeoutSeconds.map { formatNumber($0) } ?? ""
+        aiManusAPIBaseDraft = store.aiManusConfig.apiBase ?? ""
+        aiManusModelDraft = store.aiManusConfig.modelName ?? ""
+        aiManusTemperatureDraft = store.aiManusConfig.temperature.map { formatNumber($0) } ?? ""
+        aiManusMaxTokensDraft = store.aiManusConfig.maxTokens.map(String.init) ?? ""
+        aiManusExtraHeadersDraft = store.aiManusConfig.extraHeaders ?? ""
+    }
+
+    private func nonEmpty(_ value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private func doubleValue(_ value: String) -> Double? {
+        Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func intValue(_ value: String) -> Int? {
+        Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    private func formatNumber(_ value: Double) -> String {
+        if value.rounded() == value {
+            return String(Int(value))
+        }
+        return String(value)
+    }
+
+    private func audioSourceLabel(_ source: OwnscribeAudioSource) -> String {
+        switch source {
+        case .system:
+            "System audio"
+        case .mic:
+            "Mic only"
+        case .both:
+            "System + mic"
+        }
     }
 
     private func formSection<Content: View>(_ title: String, footnote: String? = nil, @ViewBuilder content: () -> Content) -> some View {
@@ -1472,25 +1972,71 @@ private struct DashboardSettingsView: View {
     }
 
     private func serviceFormRow(_ service: ServiceStatus) -> some View {
-        HStack(spacing: 12) {
-            HippoStatusDot(color: HippoTheme.stateColor(service.status), pulse: service.status == "recording", size: 8)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(service.name)
-                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
-                Text(store.serviceDetail(service.detail, status: service.status))
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+        let isExpanded = expandedServiceIDs.contains(service.id)
+
+        return Button {
+            withAnimation(.snappy(duration: 0.16)) {
+                if isExpanded {
+                    expandedServiceIDs.remove(service.id)
+                } else {
+                    expandedServiceIDs.insert(service.id)
+                }
             }
-            Spacer()
-            Text(store.serviceStatus(service.status))
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(.secondary)
-            Image(systemName: "chevron.right")
-                .foregroundStyle(.tertiary)
+        } label: {
+            HStack(spacing: 12) {
+                HippoStatusDot(color: HippoTheme.stateColor(service.status), pulse: service.status == "recording", size: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(service.name)
+                        .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    Text(store.serviceDetail(service.detail, status: service.status))
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                Text(store.serviceStatus(service.status))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 12)
+            }
+            .padding(.horizontal, 14)
+            .frame(minHeight: 52)
+            .contentShape(Rectangle())
         }
-        .padding(.horizontal, 14)
-        .frame(minHeight: 52)
+        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.985, overlayOpacity: 0.10))
+        .accessibilityLabel("\(service.name) service details")
+        .accessibilityValue(isExpanded ? "Expanded" : "Collapsed")
+    }
+
+    private func serviceExpandedRows(_ service: ServiceStatus) -> some View {
+        VStack(spacing: 0) {
+            HippoHairline()
+            formRow("Detail") {
+                Text(store.serviceDetail(service.detail, status: service.status))
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.trailing)
+                    .lineLimit(nil)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: 430, alignment: .trailing)
+            }
+            HippoHairline()
+            formRow("Status") {
+                Text(service.status)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            HippoHairline()
+            formRow("Identifier") {
+                Text(service.id)
+                    .font(.system(size: 11.5, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+        }
     }
 
     private func permissionRow(_ label: String, sub: String, icon: String, granted: Bool) -> some View {
@@ -1513,6 +2059,20 @@ private struct DashboardSettingsView: View {
         .padding(.leading, 36)
     }
 
+    private func providerField(_ title: String, text: Binding<String>) -> some View {
+        TextField(title, text: text)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12.5, design: .monospaced))
+            .frame(width: 260)
+    }
+
+    private func providerSecureField(_ title: String, text: Binding<String>) -> some View {
+        SecureField(title, text: text)
+            .textFieldStyle(.roundedBorder)
+            .font(.system(size: 12.5, design: .monospaced))
+            .frame(width: 260)
+    }
+
     private func commandButton(_ title: String, variant: HippoPushVariant = .neutral, action: @escaping () async -> Void) -> some View {
         Button(title) {
             Task { await action() }
@@ -1524,5 +2084,49 @@ private struct DashboardSettingsView: View {
     private func openSecurityPreferences() {
         guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security") else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    private func openDiagnosticsFolder() {
+        guard let root = projectRootURL() else {
+            store.lastError = "Could not locate HippoDEMO project root."
+            return
+        }
+        let logs = root
+            .appending(path: ".runtime", directoryHint: .isDirectory)
+            .appending(path: "logs", directoryHint: .isDirectory)
+        do {
+            try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+            NSWorkspace.shared.open(logs)
+        } catch {
+            store.lastError = error.localizedDescription
+        }
+    }
+
+    private func projectRootURL() -> URL? {
+        let starts = [
+            Bundle.main.bundleURL,
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath, isDirectory: true)
+        ]
+        for start in starts {
+            if let root = firstProjectRoot(from: start) {
+                return root
+            }
+        }
+        return nil
+    }
+
+    private func firstProjectRoot(from url: URL) -> URL? {
+        var current = url.hasDirectoryPath ? url : url.deletingLastPathComponent()
+        for _ in 0..<8 {
+            if FileManager.default.fileExists(atPath: current.appending(path: "orchestrator/main.py").path) {
+                return current
+            }
+            let next = current.deletingLastPathComponent()
+            if next.path == current.path {
+                break
+            }
+            current = next
+        }
+        return nil
     }
 }

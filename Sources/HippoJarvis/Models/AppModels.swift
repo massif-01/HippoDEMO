@@ -475,6 +475,18 @@ struct AiManusRuntimeLogsResponse: Codable, Equatable, Sendable {
     static let empty = AiManusRuntimeLogsResponse(logPath: nil, lines: [], detail: nil)
 }
 
+struct ModelValidationResponse: Codable, Equatable, Sendable {
+    var ok: Bool?
+    var status: String?
+    var detail: String?
+    var apiBase: String?
+    var modelName: String?
+    var modelsCount: Int?
+    var modelVisible: Bool?
+    var checkedUrl: String?
+    var envSource: String?
+}
+
 struct AiManusStatus: Codable, Equatable, Sendable {
     var ok: Bool?
     var status: String
