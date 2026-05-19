@@ -248,7 +248,7 @@ class AgentTaskRunner(TaskRunner):
                 debugpy.breakpoint()  # This will pause execution if a debugger is attached
             
             await self._put_and_add_event(task, ErrorEvent(error=f"Task error: {str(e)}"))
-            await self._session_repository.update_status(self._session_id, SessionStatus.COMPLETED)
+            await self._session_repository.update_status(self._session_id, SessionStatus.FAILED)
     
     async def _run_flow(self, message: Message) -> AsyncGenerator[BaseEvent, None]:
         """Process a single message through the agent's flow and yield events"""

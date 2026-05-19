@@ -1,5 +1,5 @@
 from typing import AsyncGenerator, Optional, List
-from app.domain.models.plan import Plan, Step, ExecutionStatus
+from app.domain.models.plan import ExecutionResult, Plan, Step, ExecutionStatus
 from app.domain.models.file import FileInfo
 from app.domain.models.message import Message
 from app.domain.services.agents.base import BaseAgent
@@ -59,12 +59,12 @@ class ExecutionAgent(BaseAgent):
                 step.error = event.error
                 yield StepEvent(status=StepStatus.FAILED, step=step)
             elif isinstance(event, MessageEvent):
-                step.status = ExecutionStatus.COMPLETED
                 parsed_response = await self._parse_json(event.message)
-                new_step = Step.model_validate(parsed_response)
-                step.success = new_step.success
-                step.result = new_step.result
-                step.attachments = new_step.attachments
+                result = ExecutionResult.model_validate(parsed_response)
+                step.status = ExecutionStatus.COMPLETED
+                step.success = result.success
+                step.result = result.result
+                step.attachments = result.attachments
                 yield StepEvent(status=StepStatus.COMPLETED, step=step)
                 if step.result:
                     yield MessageEvent(message=step.result)
