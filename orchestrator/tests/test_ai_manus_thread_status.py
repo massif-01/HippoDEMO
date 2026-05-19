@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from orchestrator import store as store_module
-from orchestrator.adapters.ai_manus import AiManusAdapter
+from orchestrator.adapters.ai_manus import AiManusAPIError, AiManusAdapter
 from orchestrator.models import AiManusThread, AiManusThreadEvent
 from orchestrator.store import OrchestratorStore
 
@@ -40,18 +40,48 @@ def test_done_and_thread_events_update_thread_status(tmp_path, monkeypatch):
     assert store.get_ai_manus_thread("chat_thread_done").status == "failed"
 
 
-def test_ai_manus_status_uses_lightweight_auth_probe(monkeypatch):
+def test_ai_manus_status_requires_auth_and_session_create_capability(monkeypatch):
     adapter = AiManusAdapter()
     adapter._config["auth_provider"] = "none"
     calls = []
+    probed = False
 
     async def fake_request(method, path, timeout_seconds=None):
         calls.append((method, path, timeout_seconds))
         return {"auth_provider": "none"}
 
+    async def fake_probe():
+        nonlocal probed
+        probed = True
+
     monkeypatch.setattr(adapter, "_request", fake_request)
+    monkeypatch.setattr(adapter, "_probe_session_create_capability", fake_probe)
 
     service = run(adapter.status())
 
     assert service.status == "online"
+    assert probed is True
     assert calls == [("GET", "/auth/status", 2.0)]
+
+
+def test_ai_manus_status_rejects_backend_without_session_create_capability(monkeypatch):
+    adapter = AiManusAdapter()
+    adapter._config["auth_provider"] = "none"
+
+    async def fake_request(method, path, timeout_seconds=None):
+        return {"auth_provider": "none"}
+
+    async def fake_probe():
+        raise AiManusAPIError(
+            "ai-manus session capability probe missing PUT for /sessions; "
+            "api_base_url=http://127.0.0.1:8000/api/v1; allow_methods=GET, POST, OPTIONS; server=TianShanMock/1.0"
+        )
+
+    monkeypatch.setattr(adapter, "_request", fake_request)
+    monkeypatch.setattr(adapter, "_probe_session_create_capability", fake_probe)
+
+    service = run(adapter.status())
+
+    assert service.status == "unavailable"
+    assert "missing PUT" in service.detail
+    assert "TianShanMock" in service.detail

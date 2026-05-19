@@ -201,6 +201,10 @@ class AiManusAdapter:
         if self.auth_required():
             return ServiceStatus(name="ai-manus", status="auth_required", detail=self.auth_required_payload()["detail"])
 
+        try:
+            await self._probe_session_create_capability()
+        except Exception as exc:
+            return ServiceStatus(name="ai-manus", status="unavailable", detail=self._safe_error(exc))
         return ServiceStatus(name="ai-manus", status="online", detail=f"api_base_url={self._api_base_url()}")
 
     async def create_session(self) -> dict[str, Any]:
@@ -447,10 +451,10 @@ class AiManusAdapter:
             )
             if status_code in {401, 403}:
                 raise AiManusAuthRequired(
-                    f"ai-manus backend rejected Orchestrator access with HTTP {status_code} for {self._safe_path(path)}; "
+                    f"ai-manus backend rejected Orchestrator access with HTTP {status_code} for {method} {self._safe_api_path(path)}; "
                     "configure ai-manus AUTH_PROVIDER=none for local adapter access, or set a valid HIPPODEMO_AI_MANUS_API_KEY."
                 ) from exc
-            raise AiManusAPIError(f"ai-manus HTTP {status_code} for {self._safe_path(path)}") from exc
+            raise AiManusAPIError(f"ai-manus HTTP {status_code} for {method} {self._safe_api_path(path)}") from exc
         except httpx.RequestError as exc:
             log_event(
                 logger,
@@ -461,6 +465,43 @@ class AiManusAdapter:
                 error_type=exc.__class__.__name__,
             )
             raise AiManusAPIError(f"ai-manus backend unavailable at {self._safe_origin()}: {exc.__class__.__name__}") from exc
+
+    async def _probe_session_create_capability(self) -> None:
+        headers = {
+            **self._headers(),
+            "Origin": self._frontend_base_url(),
+            "Access-Control-Request-Method": "PUT",
+        }
+        timeout = 2.0
+        path = "/sessions"
+        try:
+            async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+                log_event(
+                    logger,
+                    "adapter_http_started",
+                    adapter="ai-manus",
+                    method="OPTIONS",
+                    path=self._safe_path(path),
+                    timeout_seconds=timeout,
+                    capability_probe="session_create",
+                )
+                response = await client.options(self._url(path))
+                response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response else "unknown"
+            raise AiManusAPIError(f"ai-manus session capability probe HTTP {status_code} for {path}") from exc
+        except httpx.RequestError as exc:
+            raise AiManusAPIError(f"ai-manus backend unavailable at {self._safe_origin()}: {exc.__class__.__name__}") from exc
+
+        allow_methods = response.headers.get("access-control-allow-methods") or response.headers.get("allow") or ""
+        methods = {part.strip().upper() for part in allow_methods.replace(",", " ").split() if part.strip()}
+        if "PUT" not in methods and "*" not in methods:
+            server = response.headers.get("server")
+            server_detail = f"; server={server}" if server else ""
+            raise AiManusAPIError(
+                "ai-manus session capability probe missing PUT for /sessions; "
+                f"api_base_url={self._api_base_url()}; allow_methods={allow_methods or 'not reported'}{server_detail}"
+            )
 
     def _unwrap(self, payload: Any) -> Any:
         if not isinstance(payload, dict) or not {"code", "msg", "data"}.issubset(payload.keys()):
@@ -834,6 +875,9 @@ class AiManusAdapter:
 
     def _safe_path(self, path: str) -> str:
         return path if path.startswith("/") else f"/{path}"
+
+    def _safe_api_path(self, path: str) -> str:
+        return urlparse(self._url(path)).path or self._safe_path(path)
 
     def _safe_error(self, exc: Exception) -> str:
         message = str(exc)
