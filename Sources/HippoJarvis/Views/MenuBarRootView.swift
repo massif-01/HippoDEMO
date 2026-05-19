@@ -160,6 +160,7 @@ struct MenuBarRootView: View {
             HStack(spacing: 6) {
                 footerButton("waveform.path.ecg", title: "Activity", route: .liveSignal)
                 footerButton("sparkles", title: "Library", route: .skills)
+                footerButton("bubble.left.and.bubble.right.fill", title: "Chat", route: .chat)
                 footerButton("gearshape", title: "Settings", route: .settings)
                 Spacer(minLength: 0)
                 Button {
