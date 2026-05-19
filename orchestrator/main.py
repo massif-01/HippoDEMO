@@ -125,6 +125,7 @@ _cua_status_checked_at = 0.0
 _ai_manus_status_checked_at = 0.0
 _basic_memory_status_checked_at = 0.0
 _vlmac_status_checked_at = 0.0
+_vlmac_autostart_suppressed = False
 _voice_context_workers: dict[str, asyncio.Task] = {}
 _voice_context_stop_events: dict[str, asyncio.Event] = {}
 _voice_context_offsets: dict[str, float] = {}
@@ -842,12 +843,19 @@ async def _refresh_vlmac_status() -> ServiceStatus:
     if current and now - _vlmac_status_checked_at < VLMAC_STATUS_TTL_SECONDS:
         return current
 
-    service = await vlmac_adapter.status()
+    service = await _vlmac_status_with_autostart()
     async with store._lock:
         _set_service_status(service)
         await store.persist()
         _vlmac_status_checked_at = time.monotonic()
         return service
+
+
+async def _vlmac_status_with_autostart() -> ServiceStatus:
+    service = await vlmac_adapter.status()
+    if service.status == "unavailable" and not _vlmac_autostart_suppressed:
+        return await vlmac_adapter.start()
+    return service
 
 
 async def _apply_openchronicle_status(service: ServiceStatus) -> None:
@@ -2973,7 +2981,8 @@ async def ai_manus_session_detail(session_id: str):
             if remote.get("title") and not detail.get("title"):
                 detail["title"] = remote["title"]
             if remote.get("status"):
-                detail["status"] = str(remote["status"])
+                local_thread.status = str(remote["status"])
+                detail["status"] = local_thread.status
             async with store._lock:
                 local_thread.metadata["remote"] = remote
                 await store.save_ai_manus_thread(local_thread)
@@ -3301,7 +3310,7 @@ async def cua_target_surface():
 
 @app.get("/integrations/vlmac/status")
 async def vlmac_status():
-    service = await vlmac_adapter.status()
+    service = await _vlmac_status_with_autostart()
     async with store._lock:
         await _apply_vlmac_status(service)
         return to_dict(service)
@@ -3344,16 +3353,22 @@ async def _vlmac_command_snapshot(action: str, command) -> dict:
 
 @app.post("/integrations/vlmac/start")
 async def vlmac_start():
+    global _vlmac_autostart_suppressed
+    _vlmac_autostart_suppressed = False
     return await _vlmac_command_snapshot("start", vlmac_adapter.start)
 
 
 @app.post("/integrations/vlmac/stop")
 async def vlmac_stop():
+    global _vlmac_autostart_suppressed
+    _vlmac_autostart_suppressed = True
     return await _vlmac_command_snapshot("stop", vlmac_adapter.stop)
 
 
 @app.post("/integrations/vlmac/restart")
 async def vlmac_restart():
+    global _vlmac_autostart_suppressed
+    _vlmac_autostart_suppressed = False
     return await _vlmac_command_snapshot("restart", vlmac_adapter.restart)
 
 

@@ -269,8 +269,10 @@ class OrchestratorStore:
     async def append_ai_manus_event(self, session_id: str, event: AiManusThreadEvent) -> AiManusThread:
         thread = self.get_ai_manus_thread(session_id)
         thread.events.append(event)
-        if event.data.get("status"):
+        if event.event in {"session", "thread"} and event.data.get("status"):
             thread.status = str(event.data["status"])
+        elif event.event == "done":
+            thread.status = "completed"
         return await self.save_ai_manus_thread(thread)
 
 

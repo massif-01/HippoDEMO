@@ -201,12 +201,6 @@ class AiManusAdapter:
         if self.auth_required():
             return ServiceStatus(name="ai-manus", status="auth_required", detail=self.auth_required_payload()["detail"])
 
-        try:
-            await self._request("GET", "/sessions", timeout_seconds=2.0)
-        except AiManusAuthRequired as exc:
-            return ServiceStatus(name="ai-manus", status="auth_required", detail=self._safe_error(exc))
-        except Exception as exc:
-            return ServiceStatus(name="ai-manus", status="unavailable", detail=self._safe_error(exc))
         return ServiceStatus(name="ai-manus", status="online", detail=f"api_base_url={self._api_base_url()}")
 
     async def create_session(self) -> dict[str, Any]:
