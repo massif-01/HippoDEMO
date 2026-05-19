@@ -435,18 +435,35 @@ struct MenuBarRootView: View {
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(store.cuaTargetSurface.safe ? .green : .orange)
                     .frame(width: 18)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(store.cuaTargetSurface.safe ? store.text(.targetReady) : store.text(.targetBlocked))
-                        .font(.system(size: 12, weight: .semibold))
-                    Text(store.cuaTargetSurface.reason)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
+                VStack(alignment: .leading, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(store.cuaTargetSurface.safe ? store.text(.targetReady) : store.text(.targetBlocked))
+                            .font(.system(size: 12, weight: .semibold))
+                        Text(store.cuaTargetSurface.reason)
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                    if shouldOfferCuaDriverStart {
+                        Button {
+                            Task { await store.cuaDriverStart() }
+                        } label: {
+                            Label("Start cua-driver", systemImage: "play.fill")
+                        }
+                        .buttonStyle(HippoPushButtonStyle(.neutral, size: .sm))
+                        .disabled(store.isBusy)
+                    }
                 }
                 Spacer(minLength: 0)
             }
             .padding(.horizontal, 14)
             .padding(.bottom, 10)
+        }
+
+        private var shouldOfferCuaDriverStart: Bool {
+            !store.cuaTargetSurface.safe
+                && store.cuaTargetSurface.status == "unavailable"
+                && store.cuaTargetSurface.reason.localizedCaseInsensitiveContains("daemon is not running")
         }
     }
 }
