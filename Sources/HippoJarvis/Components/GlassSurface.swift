@@ -270,14 +270,14 @@ struct JarvisActionButton: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 9)
             .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .foregroundStyle(foreground)
+            .background(background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .strokeBorder(border, lineWidth: 0.7)
+            }
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(foreground)
-        .background(background, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(border, lineWidth: 0.7)
-        }
+        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 10, pressedScale: 0.97, overlayOpacity: 0.14))
     }
 
     private var foreground: Color {

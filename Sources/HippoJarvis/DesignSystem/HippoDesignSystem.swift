@@ -225,6 +225,8 @@ struct HippoPushButtonStyle: ButtonStyle {
     var variant: HippoPushVariant
     var size: HippoPushSize
     var fullWidth: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     init(_ variant: HippoPushVariant = .neutral, size: HippoPushSize = .md, fullWidth: Bool = false) {
         self.variant = variant
@@ -233,6 +235,8 @@ struct HippoPushButtonStyle: ButtonStyle {
     }
 
     func makeBody(configuration: Configuration) -> some View {
+        let isPressed = configuration.isPressed
+
         configuration.label
             .font(.system(size: size.fontSize, weight: .medium))
             .lineLimit(1)
@@ -240,14 +244,21 @@ struct HippoPushButtonStyle: ButtonStyle {
             .frame(maxWidth: fullWidth ? .infinity : nil)
             .frame(height: size.height)
             .foregroundStyle(foreground)
-            .background(background.opacity(configuration.isPressed ? 0.82 : 1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .background(background.opacity(isPressed ? pressedBackgroundOpacity : 1), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(pressedOverlay.opacity(isPressed ? 1 : 0))
+                    .allowsHitTesting(false)
+            }
             .overlay {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .strokeBorder(border, lineWidth: variant == .plain ? 0 : 0.5)
             }
-            .shadow(color: shadow, radius: 1.5, y: 1)
-            .opacity(configuration.isPressed ? 0.85 : 1)
-            .animation(.easeOut(duration: 0.08), value: configuration.isPressed)
+            .shadow(color: isPressed ? .clear : shadow, radius: isPressed ? 0 : 1.5, y: isPressed ? 0 : 1)
+            .brightness(isPressed ? -0.05 : 0)
+            .scaleEffect(isPressed && !reduceMotion ? 0.96 : 1)
+            .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.09), value: isPressed)
     }
 
     private var foreground: Color {
@@ -276,6 +287,28 @@ struct HippoPushButtonStyle: ButtonStyle {
         }
     }
 
+    private var pressedBackgroundOpacity: Double {
+        switch variant {
+        case .preferred, .stop:
+            0.70
+        case .destructive, .neutral, .glass:
+            0.76
+        case .plain:
+            1
+        }
+    }
+
+    private var pressedOverlay: Color {
+        switch variant {
+        case .preferred, .stop:
+            .black.opacity(0.22)
+        case .destructive:
+            .red.opacity(0.14)
+        case .neutral, .glass, .plain:
+            .primary.opacity(0.12)
+        }
+    }
+
     private var border: Color {
         switch variant {
         case .plain:
@@ -297,10 +330,37 @@ struct HippoPushButtonStyle: ButtonStyle {
     }
 }
 
+struct HippoPressFeedbackButtonStyle: ButtonStyle {
+    var cornerRadius: CGFloat = 8
+    var pressedScale: CGFloat = 0.96
+    var overlayOpacity: Double = 0.12
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        let isPressed = configuration.isPressed
+
+        configuration.label
+            .overlay {
+                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                    .fill(Color.primary.opacity(isPressed ? overlayOpacity : 0))
+                    .allowsHitTesting(false)
+            }
+            .brightness(isPressed ? -0.06 : 0)
+            .scaleEffect(isPressed && !reduceMotion ? pressedScale : 1)
+            .opacity(isEnabled ? 1 : 0.45)
+            .animation(.easeOut(duration: 0.09), value: isPressed)
+    }
+}
+
 extension ButtonStyle where Self == HippoPushButtonStyle {
     static var hippoNeutral: HippoPushButtonStyle { HippoPushButtonStyle(.neutral) }
     static var hippoPreferred: HippoPushButtonStyle { HippoPushButtonStyle(.preferred) }
     static var hippoStop: HippoPushButtonStyle { HippoPushButtonStyle(.stop) }
+}
+
+extension ButtonStyle where Self == HippoPressFeedbackButtonStyle {
+    static var hippoPressFeedback: HippoPressFeedbackButtonStyle { HippoPressFeedbackButtonStyle() }
 }
 
 struct HippoSymbolButton: View {
@@ -315,10 +375,10 @@ struct HippoSymbolButton: View {
             Image(systemName: systemName)
                 .font(.system(size: 13, weight: .medium))
                 .frame(width: size, height: size)
+                .foregroundStyle(active ? Color.accentColor : .secondary)
+                .background(active ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
-        .buttonStyle(.plain)
-        .foregroundStyle(active ? Color.accentColor : .secondary)
-        .background(active ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 7, pressedScale: 0.88, overlayOpacity: 0.16))
         .accessibilityLabel(title)
         .help(title)
     }

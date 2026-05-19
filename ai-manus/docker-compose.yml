@@ -32,6 +32,8 @@ services:
       - claw
       - mongodb
       - redis
+    ports:
+      - "8000:8000"
     restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

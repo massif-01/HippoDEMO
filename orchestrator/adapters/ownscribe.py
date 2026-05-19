@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -17,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..logging_config import log_event
 from ..models import ServiceStatus, now_iso
 
 
@@ -213,6 +215,7 @@ DEFAULT_AUDIO_SOURCE = "system"
 SYSTEM_AUDIO_SOURCE_ALIASES = {"system", "system-audio", "screen", "display", "app"}
 MIC_AUDIO_SOURCE_ALIASES = {"mic", "microphone", "room"}
 BOTH_AUDIO_SOURCE_ALIASES = {"both", "mixed", "system+mic", "mic+system", "all"}
+logger = logging.getLogger("orchestrator.adapters.ownscribe")
 
 
 @dataclass
@@ -493,6 +496,15 @@ class OwnscribeAdapter:
             command = [python, "-c", CHILD_CODE, str(base_output_dir)]
 
             try:
+                log_event(
+                    logger,
+                    "adapter_subprocess_started",
+                    adapter="ownscribe",
+                    action="recording.start",
+                    session_id=session_id,
+                    cwd=str(OWNSCRIBE_DIR),
+                    output_dir=str(base_output_dir),
+                )
                 with stdout_log_path.open("ab") as stdout_log, stderr_log_path.open("ab") as stderr_log:
                     popen_kwargs: dict[str, Any] = {}
                     if sys.version_info >= (3, 11):
@@ -509,6 +521,14 @@ class OwnscribeAdapter:
                         **popen_kwargs,
                     )
             except OSError as exc:
+                log_event(
+                    logger,
+                    "adapter_subprocess_failed",
+                    adapter="ownscribe",
+                    action="recording.start",
+                    session_id=session_id,
+                    error_type=exc.__class__.__name__,
+                )
                 return OwnscribeResult(
                     ok=False,
                     session_id=session_id,
@@ -530,7 +550,25 @@ class OwnscribeAdapter:
             if process.poll() is not None:
                 record.phase = "error"
                 record.result = self._collect_result(record, returncode=process.returncode)
+                log_event(
+                    logger,
+                    "adapter_subprocess_completed",
+                    adapter="ownscribe",
+                    action="recording.start",
+                    session_id=session_id,
+                    returncode=process.returncode,
+                    phase=record.phase,
+                )
                 return record.result
+            log_event(
+                logger,
+                "adapter_subprocess_running",
+                adapter="ownscribe",
+                action="recording.start",
+                session_id=session_id,
+                pid=process.pid,
+                phase=record.phase,
+            )
             return OwnscribeResult(
                 ok=True,
                 session_id=session_id,
@@ -556,6 +594,15 @@ class OwnscribeAdapter:
                 return record.result
             record.phase = "processing"
             record.stopped_at = now_iso()
+            log_event(
+                logger,
+                "adapter_subprocess_signal",
+                adapter="ownscribe",
+                action="recording.stop",
+                session_id=session_id,
+                signal="SIGINT",
+                pid=record.process.pid,
+            )
             self._signal_process_group(record.process, signal.SIGINT)
 
         error: str | None = None
@@ -594,6 +641,16 @@ class OwnscribeAdapter:
                 returncode=record.process.returncode,
                 error=error,
                 forced_failure=timed_out,
+            )
+            log_event(
+                logger,
+                "adapter_subprocess_completed",
+                adapter="ownscribe",
+                action="recording.stop",
+                session_id=session_id,
+                returncode=record.process.returncode,
+                ok=record.result.ok,
+                timed_out=timed_out,
             )
             return record.result
 

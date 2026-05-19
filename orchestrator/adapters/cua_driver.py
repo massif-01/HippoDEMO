@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..logging_config import log_event
 from ..models import CuaTargetSurface, ServiceStatus
 
 
@@ -44,6 +46,7 @@ BLOCKED_TARGET_BUNDLES = DANGEROUS_ACTIVE_BUNDLES | {
 SELF_APP_NAMES = {"HippoJarvis", "HippoDEMO", "Codex", "ChatGPT"}
 EDITABLE_AX_ROLES = ("AXTextArea", "AXTextField", "AXComboBox")
 EDITABLE_LINE_RE = re.compile(r"\[(?P<index>\d+)\]\s+(?P<role>AXTextArea|AXTextField|AXComboBox)\b")
+logger = logging.getLogger("orchestrator.adapters.cua_driver")
 
 
 @dataclass
@@ -410,6 +413,14 @@ class CuaDriverAdapter:
         if arguments:
             command.append(json.dumps(arguments, ensure_ascii=False))
         try:
+            log_event(
+                logger,
+                "adapter_subprocess_started",
+                adapter="cua-driver",
+                action=f"call.{tool_name}",
+                argument_keys=sorted(arguments.keys()),
+                timeout_seconds=timeout,
+            )
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(CUA_DRIVER_DIR) if CUA_DRIVER_DIR.exists() else None,
@@ -421,14 +432,37 @@ class CuaDriverAdapter:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             await proc.wait()
+            log_event(
+                logger,
+                "adapter_subprocess_timeout",
+                adapter="cua-driver",
+                action=f"call.{tool_name}",
+                timeout_seconds=timeout,
+            )
             return {"ok": False, "detail": f"{tool_name} timed out after {timeout:.0f}s"}
         except Exception as exc:
+            log_event(
+                logger,
+                "adapter_subprocess_failed",
+                adapter="cua-driver",
+                action=f"call.{tool_name}",
+                error_type=exc.__class__.__name__,
+            )
             return {"ok": False, "detail": str(exc)}
 
         stdout_text = stdout.decode(errors="replace").strip()
         stderr_text = stderr.decode(errors="replace").strip()
         detail = self._summarize(stderr_text or stdout_text)
         payload = self._json_payload(stdout_text)
+        log_event(
+            logger,
+            "adapter_subprocess_completed",
+            adapter="cua-driver",
+            action=f"call.{tool_name}",
+            returncode=proc.returncode,
+            stdout_chars=len(stdout_text),
+            stderr_chars=len(stderr_text),
+        )
         return {
             "ok": proc.returncode == 0,
             "detail": detail,
@@ -437,6 +471,13 @@ class CuaDriverAdapter:
 
     async def _run_management(self, executable: str, action: str, *, timeout: float) -> dict[str, Any]:
         try:
+            log_event(
+                logger,
+                "adapter_subprocess_started",
+                adapter="cua-driver",
+                action=action,
+                timeout_seconds=timeout,
+            )
             proc = await asyncio.create_subprocess_exec(
                 executable,
                 action,
@@ -449,11 +490,34 @@ class CuaDriverAdapter:
             with contextlib.suppress(ProcessLookupError):
                 proc.kill()
             await proc.wait()
+            log_event(
+                logger,
+                "adapter_subprocess_timeout",
+                adapter="cua-driver",
+                action=action,
+                timeout_seconds=timeout,
+            )
             return {"ok": False, "detail": f"{action} timed out after {timeout:.0f}s"}
         except Exception as exc:
+            log_event(
+                logger,
+                "adapter_subprocess_failed",
+                adapter="cua-driver",
+                action=action,
+                error_type=exc.__class__.__name__,
+            )
             return {"ok": False, "detail": str(exc)}
         stdout_text = stdout.decode(errors="replace").strip()
         stderr_text = stderr.decode(errors="replace").strip()
+        log_event(
+            logger,
+            "adapter_subprocess_completed",
+            adapter="cua-driver",
+            action=action,
+            returncode=proc.returncode,
+            stdout_chars=len(stdout_text),
+            stderr_chars=len(stderr_text),
+        )
         return {
             "ok": proc.returncode == 0,
             "detail": self._summarize(stderr_text or stdout_text),

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .logging_config import log_event
 from .models import (
     ActiveTask,
     AiManusThread,
@@ -31,6 +33,7 @@ AI_MANUS_DIR = DATA_DIR / "ai_manus"
 AI_MANUS_THREAD_DIR = AI_MANUS_DIR / "threads"
 BASIC_MEMORY_DIR = DATA_DIR / "basic_memory"
 CONTEXT_DIR = DATA_DIR / "context"
+logger = logging.getLogger("orchestrator.store")
 
 
 def to_dict(model: Any) -> Dict[str, Any]:
@@ -110,7 +113,16 @@ class OrchestratorStore:
             self.state.skills = []
 
     async def publish(self, event_type: str, payload: Dict[str, Any], session_id: Optional[str] = None) -> None:
-        await self.bus.publish(OrchestratorEvent(type=event_type, session_id=session_id, payload=payload))
+        event = OrchestratorEvent(type=event_type, session_id=session_id, payload=payload)
+        log_event(
+            logger,
+            "business_event_published",
+            event_type=event_type,
+            event_id=event.id,
+            session_id=session_id,
+            payload_keys=sorted(payload.keys()),
+        )
+        await self.bus.publish(event)
 
     async def persist(self) -> None:
         self.state.updated_at = now_iso()
