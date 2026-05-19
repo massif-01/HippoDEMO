@@ -125,6 +125,7 @@ _cua_status_checked_at = 0.0
 _ai_manus_status_checked_at = 0.0
 _basic_memory_status_checked_at = 0.0
 _vlmac_status_checked_at = 0.0
+_openchronicle_autostart_suppressed = False
 _vlmac_autostart_suppressed = False
 _voice_context_workers: dict[str, asyncio.Task] = {}
 _voice_context_stop_events: dict[str, asyncio.Event] = {}
@@ -737,12 +738,19 @@ async def _refresh_openchronicle_status() -> ServiceStatus:
     if current and now - _openchronicle_status_checked_at < OPENCHRONICLE_STATUS_TTL_SECONDS:
         return current
 
-    service = await openchronicle_adapter.status()
+    service = await _openchronicle_status_with_autostart()
     async with store._lock:
         _set_service_status(service)
         await store.persist()
         _openchronicle_status_checked_at = time.monotonic()
         return service
+
+
+async def _openchronicle_status_with_autostart() -> ServiceStatus:
+    service = await openchronicle_adapter.status()
+    if service.status in {"stopped", "unavailable"} and not _openchronicle_autostart_suppressed:
+        return await openchronicle_adapter.start()
+    return service
 
 
 async def _refresh_ownscribe_status() -> ServiceStatus:
@@ -1815,6 +1823,9 @@ async def events():
 
 @app.post("/session/jarvis-on")
 async def jarvis_on():
+    global _openchronicle_autostart_suppressed
+
+    _openchronicle_autostart_suppressed = False
     session = DemoSession(
         transcript=[
             {
@@ -1873,9 +1884,12 @@ async def jarvis_on():
 
 @app.post("/session/jarvis-off")
 async def jarvis_off():
+    global _openchronicle_autostart_suppressed
+
     if not store.state.current_session:
         raise HTTPException(status_code=409, detail="No active session to stop.")
     session_id = store.state.current_session.id
+    _openchronicle_autostart_suppressed = True
     openchronicle_service = await openchronicle_adapter.stop()
     await _stop_voice_context_worker(session_id)
     ownscribe_result, ownscribe_service = await _call_ownscribe(
@@ -2017,11 +2031,15 @@ async def _openchronicle_command_snapshot(action: str, command) -> dict:
 
 @app.post("/integrations/openchronicle/start")
 async def openchronicle_start():
+    global _openchronicle_autostart_suppressed
+    _openchronicle_autostart_suppressed = False
     return await _openchronicle_command_snapshot("start", openchronicle_adapter.start)
 
 
 @app.post("/integrations/openchronicle/stop")
 async def openchronicle_stop():
+    global _openchronicle_autostart_suppressed
+    _openchronicle_autostart_suppressed = True
     return await _openchronicle_command_snapshot("stop", openchronicle_adapter.stop)
 
 
