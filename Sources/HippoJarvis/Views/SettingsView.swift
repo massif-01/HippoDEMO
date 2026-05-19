@@ -904,7 +904,8 @@ struct SettingsView: View {
         let status = command.status ?? "unknown"
         let pid = command.pid.map { " · pid \($0)" } ?? ""
         let logPath = command.logPath.map { " · log \($0)" } ?? ""
-        return "\(action) \(status)\(pid)\(logPath)"
+        let detail = command.detail.map { " · \($0)" } ?? ""
+        return "\(action) \(status)\(pid)\(logPath)\(detail)"
     }
 
     private var aiManusRuntimeLogLines: [String] {

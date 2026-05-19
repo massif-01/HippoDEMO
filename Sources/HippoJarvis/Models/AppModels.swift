@@ -219,7 +219,7 @@ struct SkillRecord: Identifiable, Codable, Equatable, Sendable {
     var sourceTaskId: String?
 }
 
-struct ServiceStatus: Identifiable, Codable, Sendable {
+struct ServiceStatus: Identifiable, Codable, Equatable, Sendable {
     var id: String
     var name: String
     var status: String
@@ -409,6 +409,7 @@ struct AiManusConfig: Codable, Equatable, Sendable {
     var envExists: Bool?
     var envSource: String?
     var restartRequired: Bool?
+    var runtimeRestart: AiManusRuntimeCommandResponse?
     var clawEnabled: Bool?
     var detail: String?
 
@@ -434,6 +435,7 @@ struct AiManusConfig: Codable, Equatable, Sendable {
         envExists: nil,
         envSource: nil,
         restartRequired: nil,
+        runtimeRestart: nil,
         clawEnabled: nil,
         detail: nil
     )
@@ -456,7 +458,7 @@ struct AiManusRuntimeCommandRequest: Codable, Sendable {
     var build: Bool?
 }
 
-struct AiManusRuntimeCommandResponse: Codable, Sendable {
+struct AiManusRuntimeCommandResponse: Codable, Equatable, Sendable {
     var action: String?
     var status: String?
     var detail: String?

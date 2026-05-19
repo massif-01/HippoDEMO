@@ -2781,12 +2781,18 @@ async def ai_manus_update_config(request: AiManusConfigRequest):
     runtime_restart = None
     if config.get("restart_required"):
         runtime_restart = ai_manus_adapter.restart_runtime(build=False)
-        if runtime_restart.get("status") not in {"completed", "running"}:
-            raise HTTPException(status_code=502, detail=runtime_restart.get("detail") or "ai-manus backend restart failed")
-        await asyncio.sleep(1.0)
+        if runtime_restart.get("status") in {"completed", "running"}:
+            await asyncio.sleep(1.0)
         config = ai_manus_adapter.config()
+        config["runtime_restart"] = runtime_restart
+        if runtime_restart.get("status") not in {"completed", "running"}:
+            config["detail"] = (
+                "Saved ai-manus config; restart failed: "
+                f"{runtime_restart.get('detail') or 'ai-manus backend restart failed'}"
+            )
 
-    service = await _wait_for_ai_manus_status(timeout_seconds=18.0 if runtime_restart else 0.0)
+    wait_for_restart = bool(runtime_restart and runtime_restart.get("status") in {"completed", "running"})
+    service = await _wait_for_ai_manus_status(timeout_seconds=18.0 if wait_for_restart else 0.0)
     async with store._lock:
         await _apply_ai_manus_status(service)
         await store.publish(

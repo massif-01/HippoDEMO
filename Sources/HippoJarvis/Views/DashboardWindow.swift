@@ -1829,7 +1829,8 @@ private struct DashboardSettingsView: View {
         let action = command.action ?? "runtime"
         let status = command.status ?? "unknown"
         let pid = command.pid.map { " - pid \($0)" } ?? ""
-        return "\(action) \(status)\(pid)"
+        let detail = command.detail.map { " - \($0)" } ?? ""
+        return "\(action) \(status)\(pid)\(detail)"
     }
 
     private var aiManusRuntimeLogLines: [String] {

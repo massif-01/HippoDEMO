@@ -362,6 +362,12 @@ final class AppStateStore: ObservableObject {
                 try await client.updateAiManusConfig(request)
             }
             aiManusConfig = config
+            if let runtimeRestart = config.runtimeRestart {
+                aiManusRuntimeLastCommand = runtimeRestart
+                aiManusRuntimeLogs = (try? await withOrchestratorRecovery(action: "app_state.update_ai_manus.runtime_logs") {
+                    try await client.aiManusRuntimeLogs(limit: 80)
+                }) ?? aiManusRuntimeLogs
+            }
             do {
                 aiManusStatus = try await withOrchestratorRecovery(action: "app_state.update_ai_manus.status") {
                     try await client.aiManusStatus()
