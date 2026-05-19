@@ -101,6 +101,7 @@ struct DashboardWindow: View {
 private struct DashboardSidebar: View {
     @EnvironmentObject private var store: AppStateStore
     @Binding var route: DashboardRouteID
+    @State private var threadPendingDeletion: ManusThread?
 
     var body: some View {
         List(selection: routeSelection) {
@@ -147,6 +148,18 @@ private struct DashboardSidebar: View {
         .listStyle(.sidebar)
         .safeAreaInset(edge: .bottom) {
             footer
+        }
+        .alert("Delete Task?", isPresented: deleteThreadDialogPresented) {
+            Button("Delete", role: .destructive) {
+                deletePendingManusThread()
+            }
+            Button("Cancel", role: .cancel) {
+                threadPendingDeletion = nil
+            }
+        } message: {
+            if let threadPendingDeletion {
+                Text("This removes \(manusThreadTitle(threadPendingDeletion)) from All Tasks.")
+            }
         }
     }
 
@@ -290,8 +303,8 @@ private struct DashboardSidebar: View {
             .buttonStyle(HippoPressFeedbackButtonStyle(cornerRadius: 8, pressedScale: 0.98, overlayOpacity: 0.10))
             .accessibilityLabel(manusThreadTitle(thread))
 
-            Button(role: .destructive) {
-                Task { await store.deleteManusThread(thread) }
+            Button {
+                threadPendingDeletion = thread
             } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 11, weight: .semibold))
@@ -307,11 +320,27 @@ private struct DashboardSidebar: View {
         .background(store.currentManusThread?.id == thread.id ? HippoTheme.sidebarSelected : .clear, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
         .contextMenu {
             Button(role: .destructive) {
-                Task { await store.deleteManusThread(thread) }
+                threadPendingDeletion = thread
             } label: {
                 Label("Delete Task", systemImage: "trash")
             }
         }
+    }
+
+    private var deleteThreadDialogPresented: Binding<Bool> {
+        Binding {
+            threadPendingDeletion != nil
+        } set: { presented in
+            if !presented {
+                threadPendingDeletion = nil
+            }
+        }
+    }
+
+    private func deletePendingManusThread() {
+        guard let thread = threadPendingDeletion else { return }
+        threadPendingDeletion = nil
+        Task { await store.deleteManusThread(thread) }
     }
 
     private func manusThreadTitle(_ thread: ManusThread) -> String {
