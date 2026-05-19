@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import json
+
+import pytest
 
 from orchestrator import store as store_module
+from orchestrator.adapters import ai_manus as ai_manus_module
 from orchestrator.adapters.ai_manus import AiManusAPIError, AiManusAdapter
 from orchestrator.models import AiManusThread, AiManusThreadEvent
 from orchestrator.store import OrchestratorStore
@@ -73,8 +77,8 @@ def test_ai_manus_status_rejects_backend_without_session_create_capability(monke
 
     async def fake_probe():
         raise AiManusAPIError(
-            "ai-manus session capability probe missing PUT for /sessions; "
-            "api_base_url=http://127.0.0.1:8000/api/v1; allow_methods=GET, POST, OPTIONS; server=TianShanMock/1.0"
+            "ai-manus session capability probe missing OpenAPI PUT /api/v1/sessions; "
+            "api_base_url=http://127.0.0.1:8000/api/v1; title=Wrong Service; server=TianShanMock/1.0"
         )
 
     monkeypatch.setattr(adapter, "_request", fake_request)
@@ -83,5 +87,111 @@ def test_ai_manus_status_rejects_backend_without_session_create_capability(monke
     service = run(adapter.status())
 
     assert service.status == "unavailable"
-    assert "missing PUT" in service.detail
+    assert "missing OpenAPI PUT" in service.detail
     assert "TianShanMock" in service.detail
+
+
+class FakeHTTPResponse:
+    def __init__(self, *, headers=None, payload=None, status_code: int = 200) -> None:
+        self.headers = headers or {}
+        self._payload = payload or {}
+        self.status_code = status_code
+        self.content = json.dumps(self._payload).encode("utf-8")
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise ai_manus_module.httpx.HTTPStatusError(
+                "HTTP error",
+                request=ai_manus_module.httpx.Request("GET", "http://127.0.0.1"),
+                response=ai_manus_module.httpx.Response(self.status_code),
+            )
+
+    def json(self):
+        return self._payload
+
+
+class FakeHTTPClient:
+    def __init__(self, *, openapi_payload):
+        self.calls = []
+        self.openapi_payload = openapi_payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def get(self, url: str):
+        self.calls.append(("GET", url))
+        return FakeHTTPResponse(payload=self.openapi_payload)
+
+
+class FakeRequestHTTPClient:
+    def __init__(self) -> None:
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+    async def request(self, method: str, url: str, json=None):
+        self.calls.append((method, url, json))
+        return FakeHTTPResponse(payload={"auth_provider": "none"})
+
+
+def test_ai_manus_backend_request_disables_environment_proxy(monkeypatch):
+    adapter = AiManusAdapter()
+    client = FakeRequestHTTPClient()
+    created_kwargs = {}
+
+    def fake_async_client(*args, **kwargs):
+        created_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr(ai_manus_module.httpx, "AsyncClient", fake_async_client)
+
+    payload = run(adapter._request("GET", "/auth/status", timeout_seconds=2.0))
+
+    assert payload == {"auth_provider": "none"}
+    assert client.calls == [("GET", "http://127.0.0.1:8000/api/v1/auth/status", None)]
+    assert created_kwargs["trust_env"] is False
+
+
+def test_ai_manus_session_capability_probe_checks_openapi_put_route(monkeypatch):
+    adapter = AiManusAdapter()
+    adapter._config["base_url"] = "http://127.0.0.1:8000/api/v1"
+    client = FakeHTTPClient(
+        openapi_payload={"info": {"title": "Manus AI Agent"}, "paths": {"/api/v1/sessions": {"put": {}}}},
+    )
+    created_kwargs = {}
+
+    def fake_async_client(*args, **kwargs):
+        created_kwargs.update(kwargs)
+        return client
+
+    monkeypatch.setattr(ai_manus_module.httpx, "AsyncClient", fake_async_client)
+
+    run(adapter._probe_session_create_capability())
+
+    assert client.calls == [("GET", "http://127.0.0.1:8000/openapi.json")]
+    assert created_kwargs["trust_env"] is False
+
+
+def test_ai_manus_session_capability_probe_rejects_openapi_without_put(monkeypatch):
+    adapter = AiManusAdapter()
+    client = FakeHTTPClient(openapi_payload={"info": {"title": "Wrong Service"}, "paths": {}})
+    monkeypatch.setattr(ai_manus_module.httpx, "AsyncClient", lambda *args, **kwargs: client)
+
+    with pytest.raises(AiManusAPIError, match="missing OpenAPI PUT"):
+        run(adapter._probe_session_create_capability())
+
+
+def test_ai_manus_model_provider_proxy_env_is_disabled_for_local_urls():
+    adapter = AiManusAdapter()
+
+    assert adapter._trust_env_for_url("http://127.0.0.1:58000/v1/models") is False
+    assert adapter._trust_env_for_url("http://0.0.0.0:58000/v1/models") is False
+    assert adapter._trust_env_for_url("http://192.168.0.159:58000/v1/models") is False
+    assert adapter._trust_env_for_url("https://dashscope.aliyuncs.com/compatible-mode/v1/models") is True

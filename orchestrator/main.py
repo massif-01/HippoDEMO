@@ -1823,9 +1823,10 @@ async def events():
 
 @app.post("/session/jarvis-on")
 async def jarvis_on():
-    global _openchronicle_autostart_suppressed
+    global _openchronicle_autostart_suppressed, _vlmac_autostart_suppressed
 
     _openchronicle_autostart_suppressed = False
+    _vlmac_autostart_suppressed = False
     session = DemoSession(
         transcript=[
             {

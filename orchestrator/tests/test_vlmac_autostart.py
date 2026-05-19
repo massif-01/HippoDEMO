@@ -22,6 +22,23 @@ class FakeVlmacAdapter:
         self.started = True
         return ServiceStatus(name="vlmac", status="online", detail="started")
 
+    def config(self) -> dict:
+        return {}
+
+
+class FakeOpenChronicleAdapter:
+    def __init__(self) -> None:
+        self.started = False
+
+    async def start(self) -> ServiceStatus:
+        self.started = True
+        return ServiceStatus(name="OpenChronicle", status="online", detail="started")
+
+
+class FakeOwnscribeAdapter:
+    async def start_recording(self, **kwargs):
+        return {"name": "ownscribe", "status": "recording", "detail": "recording started"}
+
 
 def test_refresh_vlmac_status_autostarts_unavailable_service(monkeypatch):
     adapter = FakeVlmacAdapter()
@@ -47,3 +64,24 @@ def test_refresh_vlmac_status_respects_manual_stop_suppression(monkeypatch):
 
     assert adapter.started is False
     assert service.status == "unavailable"
+
+
+def test_jarvis_on_clears_vlmac_autostart_suppression(monkeypatch):
+    vlmac_adapter = FakeVlmacAdapter()
+    monkeypatch.setattr(main, "openchronicle_adapter", FakeOpenChronicleAdapter())
+    monkeypatch.setattr(main, "ownscribe_adapter", FakeOwnscribeAdapter())
+    monkeypatch.setattr(main, "vlmac_adapter", vlmac_adapter)
+    monkeypatch.setattr(main, "store", OrchestratorStore())
+    monkeypatch.setattr(main, "_openchronicle_autostart_suppressed", True)
+    monkeypatch.setattr(main, "_vlmac_autostart_suppressed", True)
+
+    async def fake_start_voice_context_worker(session_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(main, "_start_voice_context_worker", fake_start_voice_context_worker)
+
+    run(main.jarvis_on())
+
+    assert main._openchronicle_autostart_suppressed is False
+    assert main._vlmac_autostart_suppressed is False
+    assert vlmac_adapter.started is True

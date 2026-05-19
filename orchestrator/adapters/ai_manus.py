@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
@@ -303,7 +304,7 @@ class AiManusAdapter:
         url = self._join_url(api_base, "/models")
         headers = self._model_provider_headers(values)
         try:
-            async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=10.0, headers=headers, trust_env=self._trust_env_for_url(url)) as client:
                 log_event(
                     logger,
                     "model_provider_validation_started",
@@ -361,7 +362,7 @@ class AiManusAdapter:
             "attachments": attachments,
         }
         timeout = httpx.Timeout(float(self._config["timeout_seconds"]), read=None)
-        async with httpx.AsyncClient(timeout=timeout, headers=self._headers()) as client:
+        async with httpx.AsyncClient(timeout=timeout, headers=self._headers(), trust_env=False) as client:
             log_event(
                 logger,
                 "adapter_sse_started",
@@ -415,7 +416,7 @@ class AiManusAdapter:
     ) -> Any:
         timeout = float(timeout_seconds if timeout_seconds is not None else self._config["timeout_seconds"])
         try:
-            async with httpx.AsyncClient(timeout=timeout, headers=self._headers()) as client:
+            async with httpx.AsyncClient(timeout=timeout, headers=self._headers(), trust_env=False) as client:
                 log_event(
                     logger,
                     "adapter_http_started",
@@ -467,40 +468,49 @@ class AiManusAdapter:
             raise AiManusAPIError(f"ai-manus backend unavailable at {self._safe_origin()}: {exc.__class__.__name__}") from exc
 
     async def _probe_session_create_capability(self) -> None:
-        headers = {
-            **self._headers(),
-            "Origin": self._frontend_base_url(),
-            "Access-Control-Request-Method": "PUT",
-        }
         timeout = 2.0
-        path = "/sessions"
+        path = "/openapi.json"
         try:
-            async with httpx.AsyncClient(timeout=timeout, headers=headers) as client:
+            async with httpx.AsyncClient(timeout=timeout, headers=self._headers(), trust_env=False) as client:
                 log_event(
                     logger,
                     "adapter_http_started",
                     adapter="ai-manus",
-                    method="OPTIONS",
-                    path=self._safe_path(path),
+                    method="GET",
+                    path=path,
                     timeout_seconds=timeout,
                     capability_probe="session_create",
                 )
-                response = await client.options(self._url(path))
-                response.raise_for_status()
+                openapi_response = await client.get(self._origin_url(path))
+                openapi_response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             status_code = exc.response.status_code if exc.response else "unknown"
-            raise AiManusAPIError(f"ai-manus session capability probe HTTP {status_code} for {path}") from exc
+            server = exc.response.headers.get("server") if exc.response else None
+            server_detail = f"; server={server}" if server else ""
+            raise AiManusAPIError(
+                f"ai-manus OpenAPI probe HTTP {status_code} for {path}; "
+                f"api_base_url={self._api_base_url()}{server_detail}"
+            ) from exc
         except httpx.RequestError as exc:
             raise AiManusAPIError(f"ai-manus backend unavailable at {self._safe_origin()}: {exc.__class__.__name__}") from exc
 
-        allow_methods = response.headers.get("access-control-allow-methods") or response.headers.get("allow") or ""
-        methods = {part.strip().upper() for part in allow_methods.replace(",", " ").split() if part.strip()}
-        if "PUT" not in methods and "*" not in methods:
-            server = response.headers.get("server")
-            server_detail = f"; server={server}" if server else ""
+        try:
+            openapi_payload = openapi_response.json()
+        except json.JSONDecodeError as exc:
             raise AiManusAPIError(
-                "ai-manus session capability probe missing PUT for /sessions; "
-                f"api_base_url={self._api_base_url()}; allow_methods={allow_methods or 'not reported'}{server_detail}"
+                f"ai-manus session capability probe could not parse /openapi.json; api_base_url={self._api_base_url()}"
+            ) from exc
+        paths = openapi_payload.get("paths") if isinstance(openapi_payload, dict) else None
+        session_path = paths.get("/api/v1/sessions") if isinstance(paths, dict) else None
+        if not isinstance(session_path, dict) or "put" not in session_path:
+            server = openapi_response.headers.get("server")
+            server_detail = f"; server={server}" if server else ""
+            info = openapi_payload.get("info") if isinstance(openapi_payload, dict) else None
+            title = info.get("title") if isinstance(info, dict) else None
+            title_detail = f"; title={title}" if title else ""
+            raise AiManusAPIError(
+                "ai-manus session capability probe missing OpenAPI PUT /api/v1/sessions; "
+                f"api_base_url={self._api_base_url()}{title_detail}{server_detail}"
             )
 
     def _unwrap(self, payload: Any) -> Any:
@@ -537,10 +547,25 @@ class AiManusAdapter:
     def _url(self, path: str) -> str:
         return f"{self._api_base_url()}{path}"
 
+    def _origin_url(self, path: str) -> str:
+        return self._join_url(self._safe_origin(), path)
+
     def _join_url(self, base_url: str, path: str) -> str:
         base = str(base_url or "").rstrip("/")
         suffix = path if path.startswith("/") else f"/{path}"
         return f"{base}{suffix}"
+
+    def _trust_env_for_url(self, url: str) -> bool:
+        host = urlparse(url).hostname
+        if not host:
+            return True
+        if host in {"localhost", "127.0.0.1", "::1"} or host.endswith(".local"):
+            return False
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            return True
+        return not (address.is_private or address.is_loopback or address.is_link_local or address.is_unspecified)
 
     def _api_base_url(self) -> str:
         base_url = str(self._config["base_url"]).rstrip("/")
